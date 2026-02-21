@@ -6,7 +6,8 @@ import "./Overlay.css";
 
 type AppStatus = "idle" | "listening" | "transcribing" | "error";
 
-const BAR_COUNT = 30;
+const BAR_COUNT = 22;
+const SMOOTHING_FACTOR = 0.35;
 const EVENT_STATUS_CHANGED = "voice://status-changed";
 const EVENT_OVERLAY_AUDIO_LEVEL = "voice://overlay-audio-level";
 
@@ -20,10 +21,28 @@ function Overlay() {
   const [audioHistory, setAudioHistory] = useState<number[]>(() => emptyHistory());
   const statusRef = useRef<AppStatus>("idle");
   const startedAtRef = useRef<number | null>(null);
+  const smoothedHistoryRef = useRef<number[]>(emptyHistory());
 
   useEffect(() => {
     let isMounted = true;
     let unlistenFns: UnlistenFn[] = [];
+
+    const resetHistory = () => {
+      const empty = emptyHistory();
+      smoothedHistoryRef.current = empty;
+      setAudioHistory(empty);
+    };
+
+    const pushSmoothedLevel = (rawLevel: number) => {
+      const normalized = clampAudioLevel(rawLevel);
+      const previousHistory = smoothedHistoryRef.current;
+      const previousLevel = previousHistory[previousHistory.length - 1] ?? 0;
+      const smoothedLevel = previousLevel + (normalized - previousLevel) * SMOOTHING_FACTOR;
+      const nextHistory = pushAudioLevelHistory(previousHistory, smoothedLevel, BAR_COUNT);
+
+      smoothedHistoryRef.current = nextHistory;
+      setAudioHistory(nextHistory);
+    };
 
     const applyStatus = (nextStatus: AppStatus) => {
       statusRef.current = nextStatus;
@@ -39,7 +58,7 @@ function Overlay() {
 
       startedAtRef.current = null;
       setElapsedMs(0);
-      setAudioHistory(emptyHistory());
+      resetHistory();
     };
 
     async function bindOverlayEvents() {
@@ -54,9 +73,9 @@ function Overlay() {
         }
 
         applyStatus(initialStatus);
-        setAudioHistory((current) =>
-          pushAudioLevelHistory(current, clampAudioLevel(initialAudioLevel), BAR_COUNT),
-        );
+        if (initialStatus === "listening") {
+          pushSmoothedLevel(initialAudioLevel);
+        }
       } catch {
         // Overlay remains passive if backend sync is unavailable.
       }
@@ -67,8 +86,11 @@ function Overlay() {
             applyStatus(payload);
           }),
           listen<number>(EVENT_OVERLAY_AUDIO_LEVEL, ({ payload }) => {
-            const normalized = clampAudioLevel(payload);
-            setAudioHistory((current) => pushAudioLevelHistory(current, normalized, BAR_COUNT));
+            if (statusRef.current !== "listening") {
+              return;
+            }
+
+            pushSmoothedLevel(payload);
           }),
         ]);
 

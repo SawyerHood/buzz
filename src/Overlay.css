@@ -71,24 +71,24 @@ body {
 }
 
 .overlay-waveform {
-  height: 32px;
-  display: grid;
-  align-items: center;
-  grid-auto-flow: column;
-  grid-auto-columns: 3px;
+  height: 24px;
+  display: flex;
+  align-items: flex-end;
   gap: 2px;
   overflow: hidden;
 }
 
 .overlay-waveform-bar {
   --level: 0;
-  height: calc(3px + var(--level) * 28px);
-  border-radius: 999px;
-  opacity: calc(0.3 + var(--level) * 0.7);
+  flex: 1 1 0;
+  min-width: 2px;
+  height: calc(2px + var(--level) * 20px);
+  border-radius: 1px;
+  opacity: calc(0.32 + var(--level) * 0.68);
   background: linear-gradient(180deg, #ffb6b6, #ff5d6b);
   transition:
-    height 80ms linear,
-    opacity 100ms ease;
+    height 150ms ease-out,
+    opacity 150ms ease-out;
   transform-origin: center;
 }
 
