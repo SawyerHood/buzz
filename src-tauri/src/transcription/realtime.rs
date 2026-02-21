@@ -27,14 +27,17 @@ const DEFAULT_SILENCE_DURATION_MS: u64 = 500;
 const REALTIME_OUTPUT_SAMPLE_RATE_HZ: u32 = 24_000;
 const OPENAI_BETA_REALTIME_HEADER_VALUE: &str = "realtime=v1";
 
-const EVENT_SESSION_CREATED: &str = "session.created";
-const EVENT_SESSION_UPDATED: &str = "session.updated";
+const EVENT_SESSION_CREATED: &str = "transcription_session.created";
+const EVENT_SESSION_UPDATED: &str = "transcription_session.updated";
 const EVENT_SPEECH_STARTED: &str = "input_audio_buffer.speech_started";
 const EVENT_SPEECH_STOPPED: &str = "input_audio_buffer.speech_stopped";
 const EVENT_DELTA: &str = "conversation.item.input_audio_transcription.delta";
 const EVENT_COMPLETED: &str = "conversation.item.input_audio_transcription.completed";
 const EVENT_FALLBACK_DELTA: &str = "transcript.text.delta";
 const EVENT_FALLBACK_COMPLETED: &str = "transcript.text.done";
+// Also accept legacy event names from general realtime sessions
+const EVENT_SESSION_CREATED_LEGACY: &str = "session.created";
+const EVENT_SESSION_UPDATED_LEGACY: &str = "session.updated";
 const EVENT_ERROR: &str = "error";
 
 #[derive(Debug, Clone)]
@@ -567,8 +570,8 @@ fn parse_server_event(payload: &Value) -> ParsedServerEvent {
     };
 
     match event_type {
-        EVENT_SESSION_CREATED => ParsedServerEvent::SessionCreated,
-        EVENT_SESSION_UPDATED => ParsedServerEvent::SessionUpdated,
+        EVENT_SESSION_CREATED | EVENT_SESSION_CREATED_LEGACY => ParsedServerEvent::SessionCreated,
+        EVENT_SESSION_UPDATED | EVENT_SESSION_UPDATED_LEGACY => ParsedServerEvent::SessionUpdated,
         EVENT_SPEECH_STARTED => ParsedServerEvent::SpeechStarted,
         EVENT_SPEECH_STOPPED => ParsedServerEvent::SpeechStopped,
         EVENT_DELTA | EVENT_FALLBACK_DELTA => {
@@ -630,18 +633,13 @@ fn build_session_update_payload(
     }
 
     json!({
-        "type": "session.update",
+        "type": "transcription_session.update",
         "session": {
-            "type": "transcription",
-            "audio": {
-                "input": {
-                    "transcription": transcription_config,
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": config.turn_detection_threshold,
-                        "silence_duration_ms": config.silence_duration_ms,
-                    }
-                }
+            "input_audio_transcription": transcription_config,
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": config.turn_detection_threshold,
+                "silence_duration_ms": config.silence_duration_ms,
             }
         }
     })
@@ -806,25 +804,21 @@ mod tests {
             },
         );
 
-        assert_eq!(payload["type"], Value::String("session.update".to_string()));
+        assert_eq!(payload["type"], Value::String("transcription_session.update".to_string()));
         assert_eq!(
-            payload["session"]["type"],
-            Value::String("transcription".to_string())
-        );
-        assert_eq!(
-            payload["session"]["audio"]["input"]["transcription"]["model"],
+            payload["session"]["input_audio_transcription"]["model"],
             Value::String(config.transcription_model.clone())
         );
         assert_eq!(
-            payload["session"]["audio"]["input"]["transcription"]["language"],
+            payload["session"]["input_audio_transcription"]["language"],
             Value::String("en".to_string())
         );
         assert_eq!(
-            payload["session"]["audio"]["input"]["turn_detection"]["type"],
+            payload["session"]["turn_detection"]["type"],
             Value::String("server_vad".to_string())
         );
         assert_eq!(
-            payload["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"],
+            payload["session"]["turn_detection"]["silence_duration_ms"],
             Value::from(config.silence_duration_ms)
         );
     }
@@ -964,10 +958,9 @@ mod tests {
             let first_text = first.into_text().expect("session update should be text");
             let first_payload: Value = serde_json::from_str(first_text.as_ref())
                 .expect("session update JSON should parse");
-            assert_eq!(first_payload["type"], "session.update");
-            assert_eq!(first_payload["session"]["type"], "transcription");
+            assert_eq!(first_payload["type"], "transcription_session.update");
             assert_eq!(
-                first_payload["session"]["audio"]["input"]["transcription"]["model"],
+                first_payload["session"]["input_audio_transcription"]["model"],
                 Value::String(DEFAULT_OPENAI_TRANSCRIPTION_MODEL.to_string())
             );
 
