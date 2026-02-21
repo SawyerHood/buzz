@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -23,6 +24,7 @@ const CALLBACK_PATH: &str = "/auth/callback";
 const OAUTH_TIMEOUT_SECS: u64 = 300;
 const CHATGPT_HOME_URL: &str = "https://chatgpt.com/";
 pub const CHATGPT_AUTH_WINDOW_LABEL: &str = "chatgpt-auth";
+const OAUTH_ORIGINATOR: &str = "pi";
 
 const SUCCESS_HTML: &str = "<!doctype html>\
 <html lang=\"en\">\
@@ -78,7 +80,7 @@ pub async fn start_chatgpt_login<R: Runtime>(
     let authorize_url = build_authorize_url(&redirect_uri, &state, &code_challenge)?;
     info!(port, redirect_uri = %redirect_uri, "starting ChatGPT OAuth login flow");
 
-    open_authorize_url_in_webview(app, authorize_url)?;
+    open_authorize_url_in_system_browser(app, &authorize_url)?;
 
     let callback = wait_for_callback(listener, &state).await?;
     let token_response =
@@ -88,7 +90,7 @@ pub async fn start_chatgpt_login<R: Runtime>(
     let account_id = extract_chatgpt_account_id(&token_response.access_token)
         .ok_or_else(|| "OAuth token did not include a ChatGPT account id claim".to_string())?;
 
-    park_auth_window_after_login(app);
+    seed_auth_window_after_login(app);
 
     Ok(OAuthLoginResult {
         access_token: token_response.access_token,
@@ -165,61 +167,63 @@ fn build_authorize_url(
         .append_pair("scope", OAUTH_SCOPE)
         .append_pair("state", state)
         .append_pair("code_challenge", code_challenge)
-        .append_pair("code_challenge_method", "S256");
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", OAUTH_ORIGINATOR);
 
     Ok(authorize_url)
 }
 
-fn open_authorize_url_in_webview<R: Runtime>(
+fn open_authorize_url_in_system_browser<R: Runtime>(
     app: &AppHandle<R>,
-    authorize_url: Url,
+    authorize_url: &Url,
 ) -> Result<(), String> {
-    let window = if let Some(existing) = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL) {
-        existing
-    } else {
-        WebviewWindowBuilder::new(
-            app,
-            CHATGPT_AUTH_WINDOW_LABEL,
-            WebviewUrl::External(authorize_url.clone()),
-        )
-        .title("Login with ChatGPT")
-        .inner_size(980.0, 760.0)
-        .min_inner_size(700.0, 520.0)
-        .resizable(true)
-        .visible(true)
-        .build()
-        .map_err(|error| format!("Failed to create ChatGPT auth window: {error}"))?
-    };
-
-    window
-        .navigate(authorize_url)
-        .map_err(|error| format!("Failed to navigate ChatGPT auth window: {error}"))?;
-
-    if let Err(error) = window.show() {
-        warn!(%error, "failed to show ChatGPT auth window");
-    }
-    if let Err(error) = window.set_focus() {
-        warn!(%error, "failed to focus ChatGPT auth window");
-    }
-
-    Ok(())
+    app.opener()
+        .open_url(authorize_url.as_str(), None::<&str>)
+        .map_err(|error| format!("Failed to open OAuth URL in system browser: {error}"))
 }
 
-fn park_auth_window_after_login<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window): Option<WebviewWindow<R>> = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL)
-    else {
-        return;
+fn seed_auth_window_after_login<R: Runtime>(app: &AppHandle<R>) {
+    let window = match ensure_auth_window(app) {
+        Ok(window) => window,
+        Err(error) => {
+            warn!(%error, "failed to create ChatGPT auth webview after OAuth login");
+            return;
+        }
     };
 
     if let Ok(url) = Url::parse(CHATGPT_HOME_URL) {
         if let Err(error) = window.navigate(url) {
-            warn!(%error, "failed to park ChatGPT auth window on chatgpt.com");
+            warn!(%error, "failed to navigate ChatGPT auth webview to chatgpt.com");
         }
     }
 
     if let Err(error) = window.hide() {
-        warn!(%error, "failed to hide ChatGPT auth window after login");
+        warn!(%error, "failed to hide ChatGPT auth webview after OAuth login");
     }
+}
+
+fn ensure_auth_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, String> {
+    if let Some(window) = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL) {
+        return Ok(window);
+    }
+
+    let initial_url = Url::parse(CHATGPT_HOME_URL)
+        .map_err(|error| format!("Invalid ChatGPT warmup URL: {error}"))?;
+
+    WebviewWindowBuilder::new(
+        app,
+        CHATGPT_AUTH_WINDOW_LABEL,
+        WebviewUrl::External(initial_url),
+    )
+    .title("Login with ChatGPT")
+    .inner_size(980.0, 760.0)
+    .min_inner_size(700.0, 520.0)
+    .resizable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| format!("Failed to create ChatGPT auth webview: {error}"))
 }
 
 async fn wait_for_callback(
@@ -457,6 +461,7 @@ fn truncate_response_body(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn extracts_chatgpt_account_id_from_jwt_claims() {
@@ -489,5 +494,44 @@ mod tests {
         assert!(challenge.len() >= 43);
         assert!(!verifier.contains('='));
         assert!(!challenge.contains('='));
+    }
+
+    #[test]
+    fn authorize_url_contains_expected_openai_codex_query_parameters() {
+        let redirect_uri = "http://localhost:43210/auth/callback";
+        let state = "state_123";
+        let challenge = "challenge_123";
+
+        let url = build_authorize_url(redirect_uri, state, challenge).expect("authorize url");
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
+        assert_eq!(query.get("client_id").map(String::as_str), Some(CLIENT_ID));
+        assert_eq!(
+            query.get("redirect_uri").map(String::as_str),
+            Some(redirect_uri)
+        );
+        assert_eq!(query.get("scope").map(String::as_str), Some(OAUTH_SCOPE));
+        assert_eq!(query.get("state").map(String::as_str), Some(state));
+        assert_eq!(
+            query.get("code_challenge").map(String::as_str),
+            Some(challenge)
+        );
+        assert_eq!(
+            query.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(
+            query.get("id_token_add_organizations").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            query.get("codex_cli_simplified_flow").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            query.get("originator").map(String::as_str),
+            Some(OAUTH_ORIGINATOR)
+        );
     }
 }
