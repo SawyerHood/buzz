@@ -471,22 +471,58 @@ export default function Settings() {
                 {isRecordingShortcut ? "Cancel" : "Record Shortcut"}
               </Button>
             </div>
-            <Input
-              id="hotkey"
-              value={hotkeyShortcut}
-              onChange={(event) => {
-                setIsRecordingShortcut(false);
-                setHotkeyShortcut(event.currentTarget.value);
-              }}
-              placeholder={normalizeShortcut("")}
-              autoComplete="off"
-              spellCheck={false}
-              className="h-8 text-xs font-mono"
-            />
-            <p className="text-[11px] text-muted-foreground">
-              {isRecordingShortcut
-                ? "Press the shortcut now."
-                : "Fn cannot be captured on macOS because the system intercepts it. Use F5/F6/F7 or another key combo instead. Right Alt/Option is captured as Alt."}
+
+            {/* Shortcut keycap display */}
+            <div
+              className={cn(
+                "flex min-h-[36px] items-center gap-1.5 rounded-md border px-3 py-1.5 transition-all",
+                isRecordingShortcut
+                  ? "border-primary/50 bg-primary/5 shadow-[0_0_0_1px_hsl(var(--primary)/0.15)]"
+                  : "border-border bg-muted/30"
+              )}
+            >
+              {isRecordingShortcut ? (
+                <span className="flex items-center gap-2 text-xs text-primary">
+                  <span className="inline-block size-1.5 animate-pulse rounded-full bg-primary" />
+                  Press your shortcut…
+                </span>
+              ) : hotkeyShortcut ? (
+                hotkeyShortcut.split("+").map((key, i) => (
+                  <kbd
+                    key={`${key}-${i}`}
+                    className="inline-flex min-w-[28px] items-center justify-center rounded-[5px] border border-border/80 bg-background px-2 py-0.5 font-mono text-[11px] font-medium text-foreground shadow-[0_1px_0_1px_hsl(var(--border)/0.5)]"
+                  >
+                    {key.trim()}
+                  </kbd>
+                ))
+              ) : (
+                <span className="text-xs text-muted-foreground">No shortcut set</span>
+              )}
+            </div>
+
+            {/* Hidden input for custom/manual entry (synced) */}
+            {selectedShortcutPreset === CUSTOM_SHORTCUT_PRESET_VALUE && !isRecordingShortcut && (
+              <Input
+                id="hotkey"
+                value={hotkeyShortcut}
+                onChange={(event) => {
+                  setIsRecordingShortcut(false);
+                  setHotkeyShortcut(event.currentTarget.value);
+                }}
+                placeholder={normalizeShortcut("")}
+                autoComplete="off"
+                spellCheck={false}
+                className="h-8 text-xs font-mono"
+              />
+            )}
+
+            <p className="flex items-start gap-1 text-[10px] leading-relaxed text-muted-foreground/70">
+              <span className="mt-px shrink-0">ℹ</span>
+              <span>
+                {isRecordingShortcut
+                  ? "Press the key combination you want to use, then release."
+                  : "Fn cannot be captured on macOS (system intercepts it). Use F5–F7 or another combo. Right Alt/Option is captured as Alt."}
+              </span>
             </p>
           </div>
 
