@@ -124,34 +124,77 @@ where
     Ok(())
 }
 
-fn apply_settings_transaction_with_hooks<FApplyHotkey, FPersistSettings, FRollbackHotkey>(
+fn apply_settings_transaction_with_hooks<
+    FApplyHotkey,
+    FApplyLaunchAtLogin,
+    FPersistSettings,
+    FRollbackLaunchAtLogin,
+    FRollbackHotkey,
+>(
     update: VoiceSettingsUpdate,
     previous_hotkey: HotkeyConfig,
     requested_hotkey: HotkeyConfig,
+    previous_launch_at_login: bool,
+    requested_launch_at_login: bool,
     mut apply_hotkey: FApplyHotkey,
+    mut apply_launch_at_login: FApplyLaunchAtLogin,
     mut persist_settings: FPersistSettings,
+    mut rollback_launch_at_login: FRollbackLaunchAtLogin,
     mut rollback_hotkey: FRollbackHotkey,
 ) -> Result<VoiceSettings, String>
 where
     FApplyHotkey: FnMut(HotkeyConfig) -> Result<HotkeyConfig, String>,
+    FApplyLaunchAtLogin: FnMut(bool) -> Result<(), String>,
     FPersistSettings: FnMut(VoiceSettingsUpdate) -> Result<VoiceSettings, String>,
+    FRollbackLaunchAtLogin: FnMut(bool) -> Result<(), String>,
     FRollbackHotkey: FnMut(HotkeyConfig) -> Result<HotkeyConfig, String>,
 {
     let applied_hotkey = apply_hotkey(requested_hotkey)?;
+    if let Err(launch_error) = apply_launch_at_login(requested_launch_at_login) {
+        return match rollback_hotkey(previous_hotkey.clone()) {
+            Ok(_) => Err(format!(
+                "Failed to apply launch-at-login setting: {launch_error}"
+            )),
+            Err(rollback_error) => Err(format!(
+                "Failed to apply launch-at-login setting: {launch_error}. Failed to roll back hotkey config: {rollback_error}"
+            )),
+        };
+    }
 
     let mut update_with_applied_hotkey = update;
     update_with_applied_hotkey.hotkey_shortcut = Some(applied_hotkey.shortcut.clone());
     update_with_applied_hotkey.recording_mode =
         Some(recording_mode_to_settings_value(applied_hotkey.mode).to_string());
+    if update_with_applied_hotkey.launch_at_login.is_some() {
+        update_with_applied_hotkey.launch_at_login = Some(requested_launch_at_login);
+    }
 
     match persist_settings(update_with_applied_hotkey) {
         Ok(settings) => Ok(settings),
-        Err(persist_error) => match rollback_hotkey(previous_hotkey) {
-            Ok(_) => Err(format!("Failed to persist settings: {persist_error}")),
-            Err(rollback_error) => Err(format!(
-                "Failed to persist settings: {persist_error}. Failed to roll back hotkey config: {rollback_error}"
-            )),
-        },
+        Err(persist_error) => {
+            let mut rollback_failures = Vec::new();
+
+            if let Err(rollback_error) = rollback_launch_at_login(previous_launch_at_login) {
+                rollback_failures.push(format!(
+                    "Failed to roll back launch-at-login state: {rollback_error}"
+                ));
+            }
+
+            if let Err(rollback_error) = rollback_hotkey(previous_hotkey) {
+                rollback_failures.push(format!(
+                    "Failed to roll back hotkey config: {rollback_error}"
+                ));
+            }
+
+            if rollback_failures.is_empty() {
+                Err(format!("Failed to persist settings: {persist_error}"))
+            } else {
+                Err(format!(
+                    "Failed to persist settings: {persist_error}. {}",
+                    rollback_failures.join(". ")
+                ))
+            }
+        }
     }
 }
 
@@ -836,13 +879,19 @@ fn apply_settings(
 ) -> Result<VoiceSettings, String> {
     let previous_hotkey = hotkey_service.current_config();
     let requested_hotkey = resolve_hotkey_config_for_settings(&update, &previous_hotkey)?;
+    let previous_launch_at_login = get_launch_at_login_state(&app)?;
+    let requested_launch_at_login = update.launch_at_login.unwrap_or(previous_launch_at_login);
 
     apply_settings_transaction_with_hooks(
         update,
         previous_hotkey,
         requested_hotkey,
+        previous_launch_at_login,
+        requested_launch_at_login,
         |config| hotkey_service.apply_config(&app, config),
+        |enabled| set_launch_at_login_state(&app, enabled),
         |persist_update| state.services.settings_store.update(&app, persist_update),
+        |enabled| set_launch_at_login_state(&app, enabled),
         |config| hotkey_service.apply_config(&app, config),
     )
 }
@@ -868,7 +917,12 @@ fn set_launch_at_login(
             ..VoiceSettingsUpdate::default()
         },
     ) {
-        let _ = set_launch_at_login_state(&app, previous);
+        if let Err(rollback_error) = set_launch_at_login_state(&app, previous) {
+            return Err(format!(
+                "Failed to persist launch-at-login setting: {error}. Failed to roll back launch-at-login state: {rollback_error}"
+            ));
+        }
+
         return Err(format!(
             "Failed to persist launch-at-login setting: {error}"
         ));
@@ -1952,7 +2006,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_settings_rolls_back_hotkey_when_settings_persist_fails() {
+    fn apply_settings_rolls_back_hotkey_when_launch_at_login_apply_fails() {
         let previous_hotkey = HotkeyConfig {
             shortcut: "Alt+Space".to_string(),
             mode: RecordingMode::HoldToTalk,
@@ -1963,34 +2017,44 @@ mod tests {
         };
         let update = VoiceSettingsUpdate {
             microphone_id: Some(Some("mic-42".to_string())),
+            launch_at_login: Some(true),
             ..VoiceSettingsUpdate::default()
         };
         let mut applied_hotkeys = Vec::new();
         let mut rollback_hotkeys = Vec::new();
+        let mut launch_apply_attempts = Vec::new();
 
         let error = apply_settings_transaction_with_hooks(
             update,
             previous_hotkey.clone(),
             requested_hotkey.clone(),
+            false,
+            true,
             |config| {
                 applied_hotkeys.push(config.clone());
                 Ok(config)
             },
-            |_update| Err("disk full".to_string()),
+            |enabled| {
+                launch_apply_attempts.push(enabled);
+                Err("launchctl denied".to_string())
+            },
+            |_update| panic!("settings should not be persisted when launch-at-login apply fails"),
+            |_enabled| panic!("launch-at-login rollback should not run before a successful apply"),
             |config| {
                 rollback_hotkeys.push(config.clone());
                 Ok(config)
             },
         )
-        .expect_err("persist failure should return an error");
+        .expect_err("launch-at-login apply failure should return an error");
 
         assert_eq!(applied_hotkeys, vec![requested_hotkey]);
+        assert_eq!(launch_apply_attempts, vec![true]);
         assert_eq!(rollback_hotkeys, vec![previous_hotkey]);
-        assert!(error.contains("Failed to persist settings: disk full"));
+        assert!(error.contains("Failed to apply launch-at-login setting: launchctl denied"));
     }
 
     #[test]
-    fn apply_settings_reports_rollback_failure_after_persist_error() {
+    fn apply_settings_rolls_back_launch_at_login_and_hotkey_when_settings_persist_fails() {
         let previous_hotkey = HotkeyConfig {
             shortcut: "Alt+Space".to_string(),
             mode: RecordingMode::HoldToTalk,
@@ -1999,19 +2063,69 @@ mod tests {
             shortcut: "Ctrl+Space".to_string(),
             mode: RecordingMode::Toggle,
         };
-        let update = VoiceSettingsUpdate::default();
+        let update = VoiceSettingsUpdate {
+            launch_at_login: Some(true),
+            ..VoiceSettingsUpdate::default()
+        };
+        let mut rollback_launch_states = Vec::new();
+        let mut rollback_hotkeys = Vec::new();
+
+        let error = apply_settings_transaction_with_hooks(
+            update,
+            previous_hotkey.clone(),
+            requested_hotkey.clone(),
+            false,
+            true,
+            |config| Ok(config),
+            |_enabled| Ok(()),
+            |_update| Err("disk full".to_string()),
+            |enabled| {
+                rollback_launch_states.push(enabled);
+                Ok(())
+            },
+            |config| {
+                rollback_hotkeys.push(config.clone());
+                Ok(config)
+            },
+        )
+        .expect_err("persist failure should trigger both launch-at-login and hotkey rollbacks");
+
+        assert!(error.contains("Failed to persist settings: disk full"));
+        assert_eq!(rollback_launch_states, vec![false]);
+        assert_eq!(rollback_hotkeys, vec![previous_hotkey]);
+    }
+
+    #[test]
+    fn apply_settings_reports_rollback_failures_after_persist_error() {
+        let previous_hotkey = HotkeyConfig {
+            shortcut: "Alt+Space".to_string(),
+            mode: RecordingMode::HoldToTalk,
+        };
+        let requested_hotkey = HotkeyConfig {
+            shortcut: "Ctrl+Space".to_string(),
+            mode: RecordingMode::Toggle,
+        };
+        let update = VoiceSettingsUpdate {
+            launch_at_login: Some(true),
+            ..VoiceSettingsUpdate::default()
+        };
 
         let error = apply_settings_transaction_with_hooks(
             update,
             previous_hotkey,
             requested_hotkey,
+            false,
+            true,
             Ok,
+            |_enabled| Ok(()),
             |_update| Err("disk full".to_string()),
+            |_enabled| Err("launch rollback failed".to_string()),
             |_config| Err("rollback shortcut registration failed".to_string()),
         )
-        .expect_err("persist failure with rollback failure should return combined error");
+        .expect_err("persist failure with rollback failures should return combined error");
 
         assert!(error.contains("Failed to persist settings: disk full"));
+        assert!(error.contains("Failed to roll back launch-at-login state"));
         assert!(error.contains("Failed to roll back hotkey config"));
     }
 }
