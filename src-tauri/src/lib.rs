@@ -27,7 +27,6 @@ use transcription::openai::OpenAiTranscriptionProvider;
 
 #[derive(Debug)]
 struct AppServices {
-    _hotkey_service: HotkeyService,
     _audio_capture_service: AudioCaptureService,
     _transcription_provider: OpenAiTranscriptionProvider,
     _text_insertion_service: TextInsertionService,
@@ -39,7 +38,6 @@ struct AppServices {
 impl Default for AppServices {
     fn default() -> Self {
         Self {
-            _hotkey_service: HotkeyService::new(),
             _audio_capture_service: AudioCaptureService::new(),
             _transcription_provider: OpenAiTranscriptionProvider::new(),
             _text_insertion_service: TextInsertionService::new(),
@@ -113,12 +111,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .manage(HotkeyService::new())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let show_item = MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
-            let hide_item = MenuItem::with_id(app, "hide_window", "Hide Voice", true, None::<&str>)?;
+            app.handle()
+                .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+
+            let hotkey_service = app.state::<HotkeyService>();
+            hotkey_service
+                .register_default_shortcut(app.handle())
+                .map_err(std::io::Error::other)?;
+
+            let show_item =
+                MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
+            let hide_item =
+                MenuItem::with_id(app, "hide_window", "Hide Voice", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Voice", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
 
@@ -150,7 +159,13 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![get_status, set_status])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            set_status,
+            hotkey_service::get_hotkey_config,
+            hotkey_service::get_hotkey_recording_state,
+            hotkey_service::set_hotkey_config
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
