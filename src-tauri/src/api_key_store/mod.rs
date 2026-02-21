@@ -32,6 +32,10 @@ impl ApiKeyStore {
         self.backend.get(KEYCHAIN_SERVICE, account.as_str())
     }
 
+    pub fn has_api_key(&self, provider: &str) -> Result<bool, String> {
+        Ok(self.get_api_key(provider)?.is_some())
+    }
+
     pub fn set_api_key(&self, provider: &str, key: &str) -> Result<(), String> {
         let account = normalize_provider(provider)?;
         let normalized_key = normalize_api_key(key)?;
@@ -189,6 +193,10 @@ mod tests {
         store
             .set_api_key("openai", "sk-test-1")
             .expect("set should succeed");
+        assert!(
+            store.has_api_key("openai").expect("has should succeed"),
+            "expected provider to report an API key after saving"
+        );
         assert_eq!(
             store
                 .get_api_key("openai")
@@ -200,6 +208,10 @@ mod tests {
         store
             .delete_api_key("openai")
             .expect("delete should succeed");
+        assert!(
+            !store.has_api_key("openai").expect("has should succeed"),
+            "expected provider to report no API key after deletion"
+        );
         assert_eq!(
             store.get_api_key("openai").expect("get should succeed"),
             None
@@ -211,6 +223,7 @@ mod tests {
         let store = ApiKeyStore::with_backend(Arc::new(InMemoryBackend::default()));
 
         assert!(store.get_api_key("  ").is_err());
+        assert!(store.has_api_key("  ").is_err());
         assert!(store.set_api_key("openai", "   ").is_err());
         assert!(store.set_api_key("   ", "sk-test-2").is_err());
     }
@@ -222,6 +235,10 @@ mod tests {
         store
             .set_api_key("OpenAI", "sk-case")
             .expect("set should succeed");
+        assert!(
+            store.has_api_key("openai").expect("has should succeed"),
+            "expected normalized provider lookup to report stored key"
+        );
         assert_eq!(
             store
                 .get_api_key("openai")
@@ -246,6 +263,12 @@ mod tests {
         store
             .set_api_key(provider.as_str(), key.as_str())
             .expect("set should succeed");
+        assert!(
+            store
+                .has_api_key(provider.as_str())
+                .expect("has should succeed after set"),
+            "expected macOS keychain provider to report key presence"
+        );
 
         let fetched = store
             .get_api_key(provider.as_str())
@@ -255,6 +278,12 @@ mod tests {
         store
             .delete_api_key(provider.as_str())
             .expect("delete should succeed");
+        assert!(
+            !store
+                .has_api_key(provider.as_str())
+                .expect("has should succeed after delete"),
+            "expected macOS keychain provider to report no key after delete"
+        );
         assert_eq!(
             store
                 .get_api_key(provider.as_str())

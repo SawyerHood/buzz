@@ -557,11 +557,8 @@ fn set_launch_at_login(
 }
 
 #[tauri::command]
-fn get_api_key(
-    provider: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<Option<String>, String> {
-    state.services.api_key_store.get_api_key(provider.as_str())
+fn has_api_key(provider: String, state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    state.services.api_key_store.has_api_key(provider.as_str())
 }
 
 #[tauri::command]
@@ -844,7 +841,7 @@ pub fn run() {
             update_settings,
             get_launch_at_login,
             set_launch_at_login,
-            get_api_key,
+            has_api_key,
             set_api_key,
             delete_api_key,
             list_microphones,

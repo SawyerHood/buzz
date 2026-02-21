@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   createSettingsUpdatePayload,
-  maskApiKey,
   normalizeRecordingMode,
   normalizeShortcut,
   OPENAI_PROVIDER,
@@ -92,9 +91,9 @@ export default function Settings() {
   const [autoInsert, setAutoInsert] = useState(true);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
 
-  const [storedApiKey, setStoredApiKey] = useState("");
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [isApiKeyVisible, setIsApiKeyVisible] = useState(false);
+  const [isApiKeyDraftVisible, setIsApiKeyDraftVisible] = useState(false);
 
   useEffect(() => {
     if (!feedback) {
@@ -128,10 +127,10 @@ export default function Settings() {
     setIsLoading(true);
 
     try {
-      const [settings, hotkeyConfig, openAiKey] = await Promise.all([
+      const [settings, hotkeyConfig, hasOpenAiKey] = await Promise.all([
         invoke<VoiceSettings>("get_settings"),
         invoke<HotkeyConfig>("get_hotkey_config"),
-        invoke<string | null>("get_api_key", { provider: OPENAI_PROVIDER }),
+        invoke<boolean>("has_api_key", { provider: OPENAI_PROVIDER }),
       ]);
 
       setHotkeyShortcut(hotkeyConfig.shortcut || settings.hotkey_shortcut);
@@ -142,9 +141,9 @@ export default function Settings() {
       setLanguage(settings.language ?? "");
       setAutoInsert(settings.auto_insert);
       setLaunchAtLogin(settings.launch_at_login);
-      setStoredApiKey(openAiKey ?? "");
+      setHasStoredApiKey(hasOpenAiKey);
       setApiKeyDraft("");
-      setIsApiKeyVisible(false);
+      setIsApiKeyDraftVisible(false);
 
       try {
         setLaunchAtLogin(await invoke<boolean>("get_launch_at_login"));
@@ -172,21 +171,12 @@ export default function Settings() {
     [microphoneId, microphones],
   );
 
-  const hasStoredApiKey = storedApiKey.trim().length > 0;
-  const apiKeyInputValue =
-    apiKeyDraft.length > 0
-      ? apiKeyDraft
-      : isApiKeyVisible
-        ? storedApiKey
-        : "";
-  const apiKeyPlaceholder =
-    hasStoredApiKey && !isApiKeyVisible
-      ? maskApiKey(storedApiKey)
-      : hasStoredApiKey
-        ? "Saved in keychain"
-        : "sk-...";
+  const apiKeyPlaceholder = hasStoredApiKey
+    ? "Enter new key to replace existing key"
+    : "sk-...";
   const canSaveApiKey = apiKeyDraft.trim().length > 0;
   const canClearApiKey = hasStoredApiKey;
+  const canRevealApiKeyDraft = apiKeyDraft.trim().length > 0;
 
   async function handleSettingsSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -275,9 +265,9 @@ export default function Settings() {
 
     try {
       await invoke("set_api_key", { provider: OPENAI_PROVIDER, key });
-      setStoredApiKey(key);
+      setHasStoredApiKey(true);
       setApiKeyDraft("");
-      setIsApiKeyVisible(false);
+      setIsApiKeyDraftVisible(false);
       setFeedback({
         kind: "success",
         message: "OpenAI API key saved.",
@@ -295,7 +285,7 @@ export default function Settings() {
   async function handleClearApiKey() {
     if (!hasStoredApiKey) {
       setApiKeyDraft("");
-      setIsApiKeyVisible(false);
+      setIsApiKeyDraftVisible(false);
       return;
     }
 
@@ -303,9 +293,9 @@ export default function Settings() {
 
     try {
       await invoke("delete_api_key", { provider: OPENAI_PROVIDER });
-      setStoredApiKey("");
+      setHasStoredApiKey(false);
       setApiKeyDraft("");
-      setIsApiKeyVisible(false);
+      setIsApiKeyDraftVisible(false);
       setFeedback({
         kind: "success",
         message: "OpenAI API key removed.",
@@ -433,8 +423,8 @@ export default function Settings() {
             <span className="field-label">OpenAI API Key</span>
             <div className="field-row">
               <input
-                type={isApiKeyVisible ? "text" : "password"}
-                value={apiKeyInputValue}
+                type={isApiKeyDraftVisible ? "text" : "password"}
+                value={apiKeyDraft}
                 onChange={(event) => setApiKeyDraft(event.currentTarget.value)}
                 placeholder={apiKeyPlaceholder}
                 autoComplete="off"
@@ -443,10 +433,10 @@ export default function Settings() {
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => setIsApiKeyVisible((visible) => !visible)}
-                disabled={!hasStoredApiKey && apiKeyDraft.length === 0}
+                onClick={() => setIsApiKeyDraftVisible((visible) => !visible)}
+                disabled={!canRevealApiKeyDraft}
               >
-                {isApiKeyVisible ? "Hide" : "Reveal"}
+                {isApiKeyDraftVisible ? "Hide" : "Reveal"}
               </button>
             </div>
 
@@ -471,8 +461,8 @@ export default function Settings() {
 
             <p className="field-hint">
               {hasStoredApiKey
-                ? "Stored securely in macOS Keychain."
-                : "No OpenAI API key stored yet."}
+                ? "API key is set. Stored securely in macOS Keychain."
+                : "No API key."}
             </p>
           </div>
 
