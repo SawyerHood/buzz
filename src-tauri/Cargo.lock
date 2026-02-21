@@ -4154,6 +4154,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "core-foundation-sys",
+ "coreaudio-rs",
  "cpal",
  "httpdate",
  "mockito",

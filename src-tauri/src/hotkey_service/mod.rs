@@ -136,6 +136,13 @@ impl HotkeyRuntimeState {
 
         self.desired_recording = desired_recording;
     }
+
+    fn clear_registered_shortcut(&mut self) {
+        self.registered_shortcut = None;
+        self.is_recording = false;
+        self.desired_recording = false;
+        self.pending_transitions.clear();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -312,22 +319,29 @@ where
     }
 
     if let Err(error) = register_shortcut(next_config.shortcut.as_str()) {
-        let restored_previous = previous_shortcut
-            .as_deref()
-            .is_some_and(|shortcut| register_shortcut(shortcut).is_ok());
+        let register_error = error;
+        let mut restore_error: Option<String> = None;
 
-        if !restored_previous {
-            if let Ok(mut state) = state.lock() {
-                state.registered_shortcut = None;
-                state.is_recording = false;
-                state.desired_recording = false;
-                state.pending_transitions.clear();
+        if let Some(previous_shortcut) = previous_shortcut.as_deref() {
+            if let Err(error) = register_shortcut(previous_shortcut) {
+                restore_error = Some(error);
             }
         }
 
-        return Err(format!(
-            "Failed to register global hotkey `{}`: {error}",
-            next_config.shortcut
+        if should_clear_registered_shortcut_after_failed_registration(
+            previous_shortcut.as_deref(),
+            restore_error.as_deref(),
+        ) {
+            if let Ok(mut state) = state.lock() {
+                state.clear_registered_shortcut();
+            }
+        }
+
+        return Err(format_registration_failure(
+            next_config.shortcut.as_str(),
+            register_error.as_str(),
+            previous_shortcut.as_deref(),
+            restore_error.as_deref(),
         ));
     }
 
@@ -404,6 +418,32 @@ fn resolve_transition(
             ShortcutState::Pressed => Some((true, RecordingTransition::Started)),
             ShortcutState::Released => None,
         },
+    }
+}
+
+fn should_clear_registered_shortcut_after_failed_registration(
+    previous_shortcut: Option<&str>,
+    restore_error: Option<&str>,
+) -> bool {
+    previous_shortcut.is_none() || restore_error.is_some()
+}
+
+fn format_registration_failure(
+    attempted_shortcut: &str,
+    register_error: &str,
+    previous_shortcut: Option<&str>,
+    restore_error: Option<&str>,
+) -> String {
+    match (previous_shortcut, restore_error) {
+        (Some(previous_shortcut), Some(restore_error)) => format!(
+            "Failed to register global hotkey `{attempted_shortcut}`: {register_error}. Failed to restore previous hotkey `{previous_shortcut}`: {restore_error}. No global hotkey is currently registered."
+        ),
+        (Some(previous_shortcut), None) => format!(
+            "Failed to register global hotkey `{attempted_shortcut}`: {register_error}. Previous hotkey `{previous_shortcut}` remains registered."
+        ),
+        (None, _) => format!(
+            "Failed to register global hotkey `{attempted_shortcut}`: {register_error}"
+        ),
     }
 }
 
@@ -693,5 +733,52 @@ mod tests {
         assert!(!state.is_recording);
         assert!(!state.desired_recording);
         assert!(state.pending_transitions.is_empty());
+    }
+
+    #[test]
+    fn clear_registered_shortcut_resets_runtime_flags() {
+        let mut state = HotkeyRuntimeState {
+            config: HotkeyConfig::default(),
+            registered_shortcut: Some("Alt+Space".to_string()),
+            is_recording: true,
+            desired_recording: true,
+            pending_transitions: VecDeque::from([RecordingTransition::Started]),
+        };
+
+        state.clear_registered_shortcut();
+
+        assert_eq!(state.registered_shortcut, None);
+        assert!(!state.is_recording);
+        assert!(!state.desired_recording);
+        assert!(state.pending_transitions.is_empty());
+    }
+
+    #[test]
+    fn rollback_decision_clears_state_when_restore_fails_or_previous_missing() {
+        assert!(should_clear_registered_shortcut_after_failed_registration(
+            None, None
+        ));
+        assert!(should_clear_registered_shortcut_after_failed_registration(
+            Some("Alt+Space"),
+            Some("already registered")
+        ));
+        assert!(!should_clear_registered_shortcut_after_failed_registration(
+            Some("Alt+Space"),
+            None
+        ));
+    }
+
+    #[test]
+    fn registration_failure_message_reports_restore_failure_explicitly() {
+        let message = format_registration_failure(
+            "Ctrl+Shift+Space",
+            "new shortcut rejected",
+            Some("Alt+Space"),
+            Some("restore rejected"),
+        );
+
+        assert!(message.contains("Failed to register global hotkey `Ctrl+Shift+Space`"));
+        assert!(message.contains("Failed to restore previous hotkey `Alt+Space`"));
+        assert!(message.contains("No global hotkey is currently registered"));
     }
 }

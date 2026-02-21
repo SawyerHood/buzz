@@ -33,6 +33,8 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
+core-foundation-sys = "0.8"
+coreaudio-rs = { version = "0.11", default-features = false, features = ["core_audio"] }
 
 [dev-dependencies]
 mockito = "1"
