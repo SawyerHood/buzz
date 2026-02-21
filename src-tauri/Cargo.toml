@@ -42,7 +42,8 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 core-foundation-sys = "0.8"
 coreaudio-rs = { version = "0.11", default-features = false, features = ["core_audio"] }
 objc = "0.2"
-block = "0.1"
+objc2 = "0.6"
+block2 = "0.6"
 
 [dev-dependencies]
 mockito = "1"

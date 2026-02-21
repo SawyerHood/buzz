@@ -153,10 +153,11 @@ fn open_system_settings(url: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 mod macos {
-    use std::{ffi::c_void, ptr, sync::mpsc, time::Duration};
+    use std::{ffi::c_void, ptr, sync::mpsc};
 
-    use block::ConcreteBlock;
-    use objc::{class, msg_send, runtime::BOOL, sel, sel_impl};
+    use block2::RcBlock;
+    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::runtime::Bool as ObjcBool;
 
     use super::{map_microphone_authorization_status, PermissionState};
 
@@ -219,10 +220,9 @@ mod macos {
 
         unsafe {
             let capture_device_class = class!(AVCaptureDevice);
-            let completion = ConcreteBlock::new(move |granted: BOOL| {
-                let _ = tx.send(granted);
-            })
-            .copy();
+            let completion: RcBlock<dyn Fn(ObjcBool)> = RcBlock::new(move |granted: ObjcBool| {
+                let _ = tx.send(granted.as_bool());
+            });
 
             let _: () = msg_send![
                 capture_device_class,
@@ -230,13 +230,11 @@ mod macos {
                 completionHandler: &*completion
             ];
 
-            let received = rx.recv_timeout(Duration::from_secs(20)).ok();
-            drop(completion);
-
-            match received {
-                Some(true) => Ok(PermissionState::Granted),
-                Some(false) => Ok(PermissionState::Denied),
-                None => Ok(microphone_permission()),
+            // Keep the block alive until AVFoundation invokes the callback.
+            match rx.recv() {
+                Ok(true) => Ok(PermissionState::Granted),
+                Ok(false) => Ok(PermissionState::Denied),
+                Err(_) => Ok(microphone_permission()),
             }
         }
     }
