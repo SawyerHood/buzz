@@ -267,14 +267,14 @@ function DashboardView({
 }: DashboardViewProps) {
   const statusColors: Record<AppStatus, string> = {
     idle: "bg-muted-foreground",
-    listening: "bg-blue-500 animate-pulse-dot",
+    listening: "bg-emerald-500 animate-pulse-dot",
     transcribing: "bg-amber-500 animate-pulse-dot-fast",
     error: "bg-destructive",
   };
 
   const statusRingColors: Record<AppStatus, string> = {
     idle: "",
-    listening: "ring-2 ring-blue-500/20",
+    listening: "ring-2 ring-emerald-500/20",
     transcribing: "ring-2 ring-amber-500/20",
     error: "ring-2 ring-destructive/20",
   };
@@ -523,13 +523,13 @@ function App() {
   const statusDotColor = useMemo(() => {
     switch (status) {
       case "listening":
-        return "bg-blue-500";
+        return "bg-emerald-500";
       case "transcribing":
         return "bg-amber-500";
       case "error":
         return "bg-destructive";
       default:
-        return "bg-emerald-500";
+        return "bg-muted-foreground";
     }
   }, [status]);
 
@@ -599,7 +599,7 @@ function App() {
         </aside>
 
         {/* ─── Right Content ─── */}
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {/* Content header */}
           <header className="shrink-0 border-b px-4 py-3" data-tauri-drag-region="">
             <h1 className="text-sm font-semibold tracking-tight">
