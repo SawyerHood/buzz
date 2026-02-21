@@ -27,7 +27,6 @@ use transcription::openai::OpenAiTranscriptionProvider;
 
 #[derive(Debug)]
 struct AppServices {
-    _hotkey_service: HotkeyService,
     _audio_capture_service: AudioCaptureService,
     _transcription_provider: OpenAiTranscriptionProvider,
     _text_insertion_service: TextInsertionService,
@@ -39,7 +38,6 @@ struct AppServices {
 impl Default for AppServices {
     fn default() -> Self {
         Self {
-            _hotkey_service: HotkeyService::new(),
             _audio_capture_service: AudioCaptureService::new(),
             _transcription_provider: OpenAiTranscriptionProvider::new(),
             _text_insertion_service: TextInsertionService::new(),
@@ -126,9 +124,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .manage(HotkeyService::new())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            app.handle()
+                .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+
+            let hotkey_service = app.state::<HotkeyService>();
+            hotkey_service
+                .register_default_shortcut(app.handle())
+                .map_err(std::io::Error::other)?;
 
             let show_item =
                 MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
@@ -169,7 +176,10 @@ pub fn run() {
             get_status,
             set_status,
             insert_text,
-            copy_to_clipboard
+            copy_to_clipboard,
+            hotkey_service::get_hotkey_config,
+            hotkey_service::get_hotkey_recording_state,
+            hotkey_service::set_hotkey_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
