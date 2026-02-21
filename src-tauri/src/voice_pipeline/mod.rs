@@ -36,6 +36,8 @@ pub trait VoicePipelineDelegate: Send + Sync {
     fn set_status(&self, status: AppStatus);
     fn emit_transcript(&self, transcript: &str);
     fn emit_error(&self, error: &PipelineError);
+    fn on_recording_started(&self, _success: bool) {}
+    fn on_recording_stopped(&self, _success: bool) {}
     fn start_recording(&self) -> Result<(), String>;
     fn stop_recording(&self) -> Result<Vec<u8>, String>;
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> Result<String, String>;
@@ -62,8 +64,12 @@ impl VoicePipeline {
 
     pub async fn handle_hotkey_started<D: VoicePipelineDelegate>(&self, delegate: &D) {
         match delegate.start_recording() {
-            Ok(()) => delegate.set_status(AppStatus::Listening),
+            Ok(()) => {
+                delegate.on_recording_started(true);
+                delegate.set_status(AppStatus::Listening);
+            }
             Err(message) => {
+                delegate.on_recording_started(false);
                 self.handle_error(delegate, PipelineErrorStage::RecordingStart, message)
                     .await;
             }
@@ -74,8 +80,12 @@ impl VoicePipeline {
         delegate.set_status(AppStatus::Transcribing);
 
         let wav_bytes = match delegate.stop_recording() {
-            Ok(wav_bytes) => wav_bytes,
+            Ok(wav_bytes) => {
+                delegate.on_recording_stopped(true);
+                wav_bytes
+            }
             Err(message) => {
+                delegate.on_recording_stopped(false);
                 self.handle_error(delegate, PipelineErrorStage::RecordingStop, message)
                     .await;
                 return;
@@ -100,6 +110,15 @@ impl VoicePipeline {
         }
 
         delegate.set_status(AppStatus::Idle);
+    }
+
+    pub async fn handle_stage_error<D: VoicePipelineDelegate>(
+        &self,
+        delegate: &D,
+        stage: PipelineErrorStage,
+        message: String,
+    ) {
+        self.handle_error(delegate, stage, message).await;
     }
 
     async fn handle_error<D: VoicePipelineDelegate>(
@@ -128,6 +147,8 @@ mod tests {
         stop_result: Result<Vec<u8>, String>,
         transcribe_result: Result<String, String>,
         insert_result: Result<(), String>,
+        start_acknowledgements: Mutex<Vec<bool>>,
+        stop_acknowledgements: Mutex<Vec<bool>>,
         statuses: Mutex<Vec<AppStatus>>,
         transcripts: Mutex<Vec<String>>,
         errors: Mutex<Vec<PipelineError>>,
@@ -141,6 +162,8 @@ mod tests {
                 stop_result: Ok(vec![1, 2, 3]),
                 transcribe_result: Ok("hello world".to_string()),
                 insert_result: Ok(()),
+                start_acknowledgements: Mutex::new(Vec::new()),
+                stop_acknowledgements: Mutex::new(Vec::new()),
                 statuses: Mutex::new(Vec::new()),
                 transcripts: Mutex::new(Vec::new()),
                 errors: Mutex::new(Vec::new()),
@@ -177,6 +200,20 @@ mod tests {
                 .expect("call-order lock should not be poisoned")
                 .clone()
         }
+
+        fn start_acknowledgements(&self) -> Vec<bool> {
+            self.start_acknowledgements
+                .lock()
+                .expect("start-ack lock should not be poisoned")
+                .clone()
+        }
+
+        fn stop_acknowledgements(&self) -> Vec<bool> {
+            self.stop_acknowledgements
+                .lock()
+                .expect("stop-ack lock should not be poisoned")
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -200,6 +237,20 @@ mod tests {
                 .lock()
                 .expect("error lock should not be poisoned")
                 .push(error.clone());
+        }
+
+        fn on_recording_started(&self, success: bool) {
+            self.start_acknowledgements
+                .lock()
+                .expect("start-ack lock should not be poisoned")
+                .push(success);
+        }
+
+        fn on_recording_stopped(&self, success: bool) {
+            self.stop_acknowledgements
+                .lock()
+                .expect("stop-ack lock should not be poisoned")
+                .push(success);
         }
 
         fn start_recording(&self) -> Result<(), String> {
@@ -243,6 +294,8 @@ mod tests {
         pipeline.handle_hotkey_started(&delegate).await;
 
         assert_eq!(delegate.call_order(), vec!["start_recording"]);
+        assert_eq!(delegate.start_acknowledgements(), vec![true]);
+        assert!(delegate.stop_acknowledgements().is_empty());
         assert_eq!(delegate.statuses(), vec![AppStatus::Listening]);
         assert!(delegate.errors().is_empty());
     }
@@ -258,6 +311,8 @@ mod tests {
         pipeline.handle_hotkey_started(&delegate).await;
 
         assert_eq!(delegate.call_order(), vec!["start_recording"]);
+        assert_eq!(delegate.start_acknowledgements(), vec![false]);
+        assert!(delegate.stop_acknowledgements().is_empty());
         assert_eq!(delegate.statuses(), vec![AppStatus::Error, AppStatus::Idle]);
         assert_eq!(
             delegate.errors(),
@@ -279,6 +334,8 @@ mod tests {
             delegate.call_order(),
             vec!["stop_recording", "transcribe", "insert_text"]
         );
+        assert!(delegate.start_acknowledgements().is_empty());
+        assert_eq!(delegate.stop_acknowledgements(), vec![true]);
         assert_eq!(
             delegate.statuses(),
             vec![AppStatus::Transcribing, AppStatus::Idle]
@@ -298,6 +355,8 @@ mod tests {
         pipeline.handle_hotkey_stopped(&delegate).await;
 
         assert_eq!(delegate.call_order(), vec!["stop_recording"]);
+        assert!(delegate.start_acknowledgements().is_empty());
+        assert_eq!(delegate.stop_acknowledgements(), vec![false]);
         assert_eq!(
             delegate.statuses(),
             vec![AppStatus::Transcribing, AppStatus::Error, AppStatus::Idle]
@@ -323,6 +382,8 @@ mod tests {
         pipeline.handle_hotkey_stopped(&delegate).await;
 
         assert_eq!(delegate.call_order(), vec!["stop_recording", "transcribe"]);
+        assert!(delegate.start_acknowledgements().is_empty());
+        assert_eq!(delegate.stop_acknowledgements(), vec![true]);
         assert_eq!(
             delegate.statuses(),
             vec![AppStatus::Transcribing, AppStatus::Error, AppStatus::Idle]
@@ -335,5 +396,28 @@ mod tests {
             }]
         );
         assert!(delegate.transcripts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_stage_error_uses_same_error_reset_policy() {
+        let pipeline = VoicePipeline::new(Duration::ZERO);
+        let delegate = MockDelegate::default();
+
+        pipeline
+            .handle_stage_error(
+                &delegate,
+                PipelineErrorStage::Transcription,
+                "provider unavailable".to_string(),
+            )
+            .await;
+
+        assert_eq!(delegate.statuses(), vec![AppStatus::Error, AppStatus::Idle]);
+        assert_eq!(
+            delegate.errors(),
+            vec![PipelineError {
+                stage: PipelineErrorStage::Transcription,
+                message: "provider unavailable".to_string(),
+            }]
+        );
     }
 }
