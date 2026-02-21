@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:install": "tauri build && cp -r src-tauri/target/release/bundle/macos/*.app /Applications/",
     "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri"
