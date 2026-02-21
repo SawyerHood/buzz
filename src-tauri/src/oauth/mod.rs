@@ -3,8 +3,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Runtime};
-use tauri_plugin_opener::OpenerExt;
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -22,6 +21,8 @@ const OAUTH_SCOPE: &str = "openid profile email offline_access";
 const JWT_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 const CALLBACK_PATH: &str = "/auth/callback";
 const OAUTH_TIMEOUT_SECS: u64 = 300;
+const CHATGPT_HOME_URL: &str = "https://chatgpt.com/";
+pub const CHATGPT_AUTH_WINDOW_LABEL: &str = "chatgpt-auth";
 
 const SUCCESS_HTML: &str = "<!doctype html>\
 <html lang=\"en\">\
@@ -77,9 +78,7 @@ pub async fn start_chatgpt_login<R: Runtime>(
     let authorize_url = build_authorize_url(&redirect_uri, &state, &code_challenge)?;
     info!(port, redirect_uri = %redirect_uri, "starting ChatGPT OAuth login flow");
 
-    app.opener()
-        .open_url(authorize_url.as_str(), None::<String>)
-        .map_err(|error| format!("Failed to open browser for ChatGPT login: {error}"))?;
+    open_authorize_url_in_webview(app, authorize_url)?;
 
     let callback = wait_for_callback(listener, &state).await?;
     let token_response =
@@ -88,6 +87,8 @@ pub async fn start_chatgpt_login<R: Runtime>(
     let refresh_token = normalize_required_string(token_response.refresh_token, "refresh_token")?;
     let account_id = extract_chatgpt_account_id(&token_response.access_token)
         .ok_or_else(|| "OAuth token did not include a ChatGPT account id claim".to_string())?;
+
+    park_auth_window_after_login(app);
 
     Ok(OAuthLoginResult {
         access_token: token_response.access_token,
@@ -167,6 +168,58 @@ fn build_authorize_url(
         .append_pair("code_challenge_method", "S256");
 
     Ok(authorize_url)
+}
+
+fn open_authorize_url_in_webview<R: Runtime>(
+    app: &AppHandle<R>,
+    authorize_url: Url,
+) -> Result<(), String> {
+    let window = if let Some(existing) = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL) {
+        existing
+    } else {
+        WebviewWindowBuilder::new(
+            app,
+            CHATGPT_AUTH_WINDOW_LABEL,
+            WebviewUrl::External(authorize_url.clone()),
+        )
+        .title("Login with ChatGPT")
+        .inner_size(980.0, 760.0)
+        .min_inner_size(700.0, 520.0)
+        .resizable(true)
+        .visible(true)
+        .build()
+        .map_err(|error| format!("Failed to create ChatGPT auth window: {error}"))?
+    };
+
+    window
+        .navigate(authorize_url)
+        .map_err(|error| format!("Failed to navigate ChatGPT auth window: {error}"))?;
+
+    if let Err(error) = window.show() {
+        warn!(%error, "failed to show ChatGPT auth window");
+    }
+    if let Err(error) = window.set_focus() {
+        warn!(%error, "failed to focus ChatGPT auth window");
+    }
+
+    Ok(())
+}
+
+fn park_auth_window_after_login<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window): Option<WebviewWindow<R>> = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL)
+    else {
+        return;
+    };
+
+    if let Ok(url) = Url::parse(CHATGPT_HOME_URL) {
+        if let Err(error) = window.navigate(url) {
+            warn!(%error, "failed to park ChatGPT auth window on chatgpt.com");
+        }
+    }
+
+    if let Err(error) = window.hide() {
+        warn!(%error, "failed to hide ChatGPT auth window after login");
+    }
 }
 
 async fn wait_for_callback(

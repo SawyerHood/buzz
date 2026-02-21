@@ -55,7 +55,7 @@ use transcription::realtime::{
     OpenAiRealtimeTranscriptionClient, OpenAiRealtimeTranscriptionConfig,
     RealtimeTranscriptionSession,
 };
-use transcription::{TranscriptionOptions, TranscriptionOrchestrator, TranscriptionProvider};
+use transcription::{TranscriptionOptions, TranscriptionOrchestrator};
 use voice_pipeline::{PipelineError, PipelineTranscript, VoicePipeline, VoicePipelineDelegate};
 
 const EVENT_STATUS_CHANGED: &str = "voice://status-changed";
@@ -748,7 +748,11 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
 
         let transcription = match auth_method {
             AuthMethod::ApiKey => orchestrator.transcribe(wav_bytes, options).await,
-            AuthMethod::ChatgptOauth => chatgpt_provider.transcribe(wav_bytes, options).await,
+            AuthMethod::ChatgptOauth => {
+                chatgpt_provider
+                    .transcribe_via_webview(&self.app, wav_bytes, options)
+                    .await
+            }
             AuthMethod::None => unreachable!("auth method none is handled above"),
         };
 
@@ -1652,7 +1656,7 @@ async fn transcribe_audio(
         AuthMethod::ApiKey => orchestrator.transcribe(audio_bytes, request_options).await,
         AuthMethod::ChatgptOauth => {
             chatgpt_provider
-                .transcribe(audio_bytes, request_options)
+                .transcribe_via_webview(&app, audio_bytes, request_options)
                 .await
         }
         AuthMethod::None => Err(transcription::TranscriptionError::Provider(
