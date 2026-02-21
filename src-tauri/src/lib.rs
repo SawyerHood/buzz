@@ -268,8 +268,8 @@ impl AppServices {
         let provider = OpenAiTranscriptionProvider::new(openai_config.clone());
         let transcription_orchestrator = TranscriptionOrchestrator::new(Arc::new(provider));
         let mut realtime_config = OpenAiRealtimeTranscriptionConfig::from_env();
-        if realtime_config.model.trim().is_empty() {
-            realtime_config.model = openai_config.model.clone();
+        if realtime_config.transcription_model.trim().is_empty() {
+            realtime_config.transcription_model = openai_config.model.clone();
         }
         realtime_config.api_key = openai_config.api_key.clone();
         realtime_config.api_key_store_app_data_dir = Some(app_data_dir.clone());

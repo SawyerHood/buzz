@@ -19,7 +19,8 @@ use super::{
 };
 
 const DEFAULT_OPENAI_REALTIME_ENDPOINT: &str = "wss://api.openai.com/v1/realtime";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini-transcribe";
+const DEFAULT_OPENAI_REALTIME_MODEL: &str = "gpt-realtime";
+const DEFAULT_OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
 const DEFAULT_COMMIT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_TURN_THRESHOLD: f32 = 0.5;
 const DEFAULT_SILENCE_DURATION_MS: u64 = 500;
@@ -41,7 +42,8 @@ pub struct OpenAiRealtimeTranscriptionConfig {
     pub api_key: Option<String>,
     pub api_key_store_app_data_dir: Option<PathBuf>,
     pub endpoint: String,
-    pub model: String,
+    pub realtime_model: String,
+    pub transcription_model: String,
     pub commit_timeout_secs: u64,
     pub turn_detection_threshold: f32,
     pub silence_duration_ms: u64,
@@ -53,7 +55,8 @@ impl Default for OpenAiRealtimeTranscriptionConfig {
             api_key: None,
             api_key_store_app_data_dir: None,
             endpoint: DEFAULT_OPENAI_REALTIME_ENDPOINT.to_string(),
-            model: DEFAULT_OPENAI_MODEL.to_string(),
+            realtime_model: DEFAULT_OPENAI_REALTIME_MODEL.to_string(),
+            transcription_model: DEFAULT_OPENAI_TRANSCRIPTION_MODEL.to_string(),
             commit_timeout_secs: DEFAULT_COMMIT_TIMEOUT_SECS,
             turn_detection_threshold: DEFAULT_TURN_THRESHOLD,
             silence_duration_ms: DEFAULT_SILENCE_DURATION_MS,
@@ -71,10 +74,14 @@ impl OpenAiRealtimeTranscriptionConfig {
             config.endpoint = endpoint;
         }
 
-        if let Some(model) = read_non_empty_env("OPENAI_REALTIME_TRANSCRIPTION_MODEL")
+        if let Some(realtime_model) = read_non_empty_env("OPENAI_REALTIME_MODEL") {
+            config.realtime_model = realtime_model;
+        }
+
+        if let Some(transcription_model) = read_non_empty_env("OPENAI_REALTIME_TRANSCRIPTION_MODEL")
             .or_else(|| read_non_empty_env("OPENAI_TRANSCRIPTION_MODEL"))
         {
-            config.model = model;
+            config.transcription_model = transcription_model;
         }
 
         if let Some(timeout_secs) = read_u64_env("OPENAI_REALTIME_COMMIT_TIMEOUT_SECS") {
@@ -83,7 +90,8 @@ impl OpenAiRealtimeTranscriptionConfig {
 
         debug!(
             endpoint = %config.endpoint,
-            model = %config.model,
+            realtime_model = %config.realtime_model,
+            transcription_model = %config.transcription_model,
             commit_timeout_secs = config.commit_timeout_secs,
             "loaded OpenAI realtime transcription config"
         );
@@ -101,7 +109,8 @@ impl OpenAiRealtimeTranscriptionClient {
     pub fn new(config: OpenAiRealtimeTranscriptionConfig) -> Self {
         info!(
             endpoint = %config.endpoint,
-            model = %config.model,
+            realtime_model = %config.realtime_model,
+            transcription_model = %config.transcription_model,
             commit_timeout_secs = config.commit_timeout_secs,
             "OpenAI realtime transcription client initialized"
         );
@@ -109,11 +118,11 @@ impl OpenAiRealtimeTranscriptionClient {
     }
 
     pub fn model_supports_realtime(&self) -> bool {
-        model_supports_realtime(&self.config.model)
+        model_supports_realtime(&self.config.realtime_model)
     }
 
     pub fn model(&self) -> &str {
-        &self.config.model
+        &self.config.realtime_model
     }
 
     pub fn begin_session(
@@ -123,7 +132,7 @@ impl OpenAiRealtimeTranscriptionClient {
         if !self.model_supports_realtime() {
             return Err(TranscriptionError::Provider(format!(
                 "Configured model `{}` does not support realtime transcription",
-                self.config.model
+                self.config.realtime_model
             )));
         }
 
@@ -314,7 +323,7 @@ async fn run_realtime_session(
     options: TranscriptionOptions,
     mut command_rx: mpsc::UnboundedReceiver<RealtimeCommand>,
 ) -> Result<TranscriptionResult, TranscriptionError> {
-    let endpoint = resolve_realtime_endpoint(&config.endpoint, &config.model)?;
+    let endpoint = resolve_realtime_endpoint(&config.endpoint, &config.realtime_model)?;
     let mut request = endpoint.clone().into_client_request().map_err(|error| {
         TranscriptionError::Provider(format!(
             "Invalid realtime websocket endpoint `{endpoint}`: {error}",
@@ -336,14 +345,16 @@ async fn run_realtime_session(
 
     info!(
         endpoint = %endpoint,
-        model = %config.model,
+        realtime_model = %config.realtime_model,
+        transcription_model = %config.transcription_model,
         "connecting realtime transcription websocket"
     );
     let (ws_stream, response) = connect_async(request).await.map_err(|error| {
         let mapped = map_websocket_error(error);
         warn!(
             endpoint = %endpoint,
-            model = %config.model,
+            realtime_model = %config.realtime_model,
+            transcription_model = %config.transcription_model,
             error = %mapped,
             "failed to connect realtime transcription websocket"
         );
@@ -608,7 +619,7 @@ fn build_session_update_payload(
     config: &OpenAiRealtimeTranscriptionConfig,
     options: &TranscriptionOptions,
 ) -> Value {
-    let mut transcription_config = json!({ "model": config.model.clone() });
+    let mut transcription_config = json!({ "model": config.transcription_model.clone() });
 
     if let Some(language) = normalize_optional_string(options.language.clone()) {
         transcription_config["language"] = Value::String(language);
@@ -621,7 +632,7 @@ fn build_session_update_payload(
     json!({
         "type": "session.update",
         "session": {
-            "type": "realtime.transcription_session",
+            "type": "transcription",
             "audio": {
                 "input": {
                     "transcription": transcription_config,
@@ -665,11 +676,7 @@ fn model_supports_realtime(model: &str) -> bool {
         return false;
     }
 
-    if normalized == "whisper-1" || normalized.contains("whisper") {
-        return false;
-    }
-
-    normalized.contains("transcribe")
+    normalized.contains("realtime")
 }
 
 fn resample_pcm16_linear(input: &[i16], input_rate_hz: u32, output_rate_hz: u32) -> Vec<i16> {
@@ -779,7 +786,9 @@ mod tests {
 
     #[test]
     fn model_supports_realtime_rejects_whisper() {
-        assert!(model_supports_realtime("gpt-4o-mini-transcribe"));
+        assert!(model_supports_realtime("gpt-realtime"));
+        assert!(model_supports_realtime("gpt-4o-realtime-preview"));
+        assert!(!model_supports_realtime("gpt-4o-mini-transcribe"));
         assert!(!model_supports_realtime("whisper-1"));
         assert!(!model_supports_realtime("whisper-large"));
     }
@@ -799,8 +808,12 @@ mod tests {
 
         assert_eq!(payload["type"], Value::String("session.update".to_string()));
         assert_eq!(
+            payload["session"]["type"],
+            Value::String("transcription".to_string())
+        );
+        assert_eq!(
             payload["session"]["audio"]["input"]["transcription"]["model"],
-            Value::String(config.model.clone())
+            Value::String(config.transcription_model.clone())
         );
         assert_eq!(
             payload["session"]["audio"]["input"]["transcription"]["language"],
@@ -819,14 +832,14 @@ mod tests {
     #[test]
     fn resolve_realtime_endpoint_appends_model_query_parameter() {
         let endpoint = "wss://api.openai.com/v1/realtime?intent=transcription";
-        let resolved = resolve_realtime_endpoint(endpoint, "gpt-4o-mini-transcribe")
+        let resolved = resolve_realtime_endpoint(endpoint, "gpt-realtime")
             .expect("endpoint should parse and include model query");
         let parsed = Url::parse(&resolved).expect("resolved endpoint should be valid URL");
         let model = parsed
             .query_pairs()
             .find(|(key, _)| key == "model")
             .map(|(_, value)| value.to_string());
-        assert_eq!(model.as_deref(), Some("gpt-4o-mini-transcribe"));
+        assert_eq!(model.as_deref(), Some("gpt-realtime"));
     }
 
     #[test]
@@ -952,6 +965,11 @@ mod tests {
             let first_payload: Value = serde_json::from_str(first_text.as_ref())
                 .expect("session update JSON should parse");
             assert_eq!(first_payload["type"], "session.update");
+            assert_eq!(first_payload["session"]["type"], "transcription");
+            assert_eq!(
+                first_payload["session"]["audio"]["input"]["transcription"]["model"],
+                Value::String(DEFAULT_OPENAI_TRANSCRIPTION_MODEL.to_string())
+            );
 
             let append = read
                 .next()
@@ -1060,6 +1078,6 @@ mod tests {
             .expect("request URI lock should not be poisoned")
             .clone()
             .unwrap_or_default();
-        assert!(request_uri.contains("model=gpt-4o-mini-transcribe"));
+        assert!(request_uri.contains("model=gpt-realtime"));
     }
 }
