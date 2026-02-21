@@ -465,7 +465,7 @@ export default function Settings() {
               <Button
                 type="button"
                 variant={isRecordingShortcut ? "default" : "outline"}
-                size="xs"
+                size="default"
                 onClick={handleRecordShortcutClick}
               >
                 {isRecordingShortcut ? "Cancel" : "Record Shortcut"}
