@@ -128,10 +128,6 @@ impl TextInsertionService {
     pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
         insert_text_with_backend(&self.backend, text, InsertionMode::CopyOnly)
     }
-
-    pub fn insert_text_with_mode(&self, text: &str, mode: InsertionMode) -> Result<(), String> {
-        insert_text_with_backend(&self.backend, text, mode)
-    }
 }
 
 fn insert_text_with_backend<B: InsertionBackend>(

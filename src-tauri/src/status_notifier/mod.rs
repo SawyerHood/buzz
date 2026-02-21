@@ -21,12 +21,6 @@ pub struct StatusNotifier {
 }
 
 impl StatusNotifier {
-    pub fn new() -> Self {
-        Self {
-            current: AppStatus::Idle,
-        }
-    }
-
     pub fn current(&self) -> AppStatus {
         self.current
     }

@@ -71,6 +71,7 @@ impl Default for VoicePipeline {
 }
 
 impl VoicePipeline {
+    #[cfg(test)]
     pub fn new(error_reset_delay: Duration) -> Self {
         Self { error_reset_delay }
     }

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::settings_store::DEFAULT_TRANSCRIPTION_PROVIDER;
+
 const KEYCHAIN_SERVICE: &str = "voice.transcription.api-keys";
 #[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -118,7 +120,28 @@ fn normalize_provider(provider: &str) -> Result<String, String> {
         return Err("`provider` cannot be empty".to_string());
     }
 
+    if !is_supported_provider(trimmed.as_str()) {
+        return Err(format!(
+            "Unsupported provider `{trimmed}`. Expected `{DEFAULT_TRANSCRIPTION_PROVIDER}`"
+        ));
+    }
+
     Ok(trimmed)
+}
+
+fn is_supported_provider(provider: &str) -> bool {
+    if provider == DEFAULT_TRANSCRIPTION_PROVIDER {
+        return true;
+    }
+
+    #[cfg(test)]
+    {
+        if provider.starts_with("openai-test-") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn normalize_api_key(key: &str) -> Result<String, String> {
@@ -248,6 +271,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_unsupported_provider() {
+        let store = ApiKeyStore::with_backend(Arc::new(InMemoryBackend::default()));
+
+        assert!(store.get_api_key("anthropic").is_err());
+        assert!(store.has_api_key("gemini").is_err());
+        assert!(store.set_api_key("azure-openai", "sk-test").is_err());
+        assert!(store.delete_api_key("custom").is_err());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_keychain_backend_round_trip_works() {
@@ -260,6 +293,7 @@ mod tests {
         let key = format!("sk-roundtrip-{suffix}");
 
         let _ = store.delete_api_key(provider.as_str());
+
         store
             .set_api_key(provider.as_str(), key.as_str())
             .expect("set should succeed");

@@ -1,7 +1,9 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -10,6 +12,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const HISTORY_FILE_NAME: &str = "transcript_history.json";
+pub const MAX_HISTORY_PAGE_SIZE: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -75,8 +78,8 @@ impl HistoryStore {
             .map_err(|_| "History store lock is poisoned".to_string())?;
         let mut entries = self.read_entries()?;
 
-        entries.push(entry);
-        entries.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        let insert_at = entries.partition_point(|existing| existing.timestamp >= entry.timestamp);
+        entries.insert(insert_at, entry);
 
         self.write_entries(&entries)
     }
@@ -90,10 +93,13 @@ impl HistoryStore {
             .io_lock
             .lock()
             .map_err(|_| "History store lock is poisoned".to_string())?;
-        let mut entries = self.read_entries()?;
-        entries.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        let entries = self.read_entries()?;
 
-        Ok(entries.into_iter().skip(offset).take(limit).collect())
+        Ok(entries
+            .into_iter()
+            .skip(offset)
+            .take(limit.min(MAX_HISTORY_PAGE_SIZE))
+            .collect())
     }
 
     pub fn get_entry(&self, id: &str) -> Result<Option<HistoryEntry>, String> {
@@ -144,20 +150,83 @@ impl HistoryStore {
             return Ok(Vec::new());
         }
 
-        serde_json::from_str::<Vec<HistoryEntry>>(&raw_contents)
-            .map_err(|error| format!("Failed to parse transcript history file: {error}"))
+        let mut entries = match serde_json::from_str::<Vec<HistoryEntry>>(&raw_contents) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.recover_malformed_history_file(format!(
+                    "Failed to parse transcript history file: {error}"
+                ))?;
+                return Ok(Vec::new());
+            }
+        };
+
+        if let Err(error) = entries.iter().try_for_each(validate_entry) {
+            self.recover_malformed_history_file(format!(
+                "Failed to validate transcript history file: {error}"
+            ))?;
+            return Ok(Vec::new());
+        }
+
+        if !entries
+            .windows(2)
+            .all(|window| window[0].timestamp >= window[1].timestamp)
+        {
+            entries.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        }
+
+        Ok(entries)
     }
 
     fn write_entries(&self, entries: &[HistoryEntry]) -> Result<(), String> {
         let serialized = serde_json::to_vec_pretty(entries)
             .map_err(|error| format!("Failed to serialize transcript history entries: {error}"))?;
-        let temp_path = self.file_path.with_extension("tmp");
+        let temp_path = temp_file_path_for(&self.file_path);
 
-        fs::write(&temp_path, serialized)
-            .map_err(|error| format!("Failed to write transcript history temp file: {error}"))?;
-        fs::rename(&temp_path, &self.file_path)
-            .map_err(|error| format!("Failed to finalize transcript history file: {error}"))?;
+        let mut temp_file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|error| {
+                format!(
+                    "Failed to create transcript history temp file `{}`: {error}",
+                    temp_path.display()
+                )
+            })?;
 
+        if let Err(error) = temp_file.write_all(&serialized) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!(
+                "Failed to write transcript history temp file `{}`: {error}",
+                temp_path.display()
+            ));
+        }
+
+        if let Err(error) = temp_file.sync_all() {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!(
+                "Failed to flush transcript history temp file `{}`: {error}",
+                temp_path.display()
+            ));
+        }
+
+        drop(temp_file);
+
+        fs::rename(&temp_path, &self.file_path).map_err(|error| {
+            let _ = fs::remove_file(&temp_path);
+            format!("Failed to finalize transcript history file: {error}")
+        })?;
+
+        Ok(())
+    }
+
+    fn recover_malformed_history_file(&self, reason: String) -> Result<(), String> {
+        let backup_path = backup_corrupt_history_file(&self.file_path)?;
+        self.write_entries(&[])?;
+        eprintln!(
+            "Recovered malformed history file `{}` (backup: `{}`): {reason}",
+            self.file_path.display(),
+            backup_path.display(),
+        );
         Ok(())
     }
 }
@@ -185,6 +254,47 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn temp_file_path_for(file_path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("transcript_history.json");
+
+    file_path.with_file_name(format!(
+        ".{file_name}.{}.{timestamp}.tmp",
+        std::process::id()
+    ))
+}
+
+fn backup_corrupt_history_file(file_path: &Path) -> Result<PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("transcript_history.json");
+    let backup_path = file_path.with_file_name(format!(
+        "{file_name}.corrupt-{}-{timestamp}.bak",
+        std::process::id()
+    ));
+
+    fs::rename(file_path, &backup_path).map_err(|error| {
+        format!(
+            "Failed to backup malformed history file `{}` to `{}`: {error}",
+            file_path.display(),
+            backup_path.display()
+        )
+    })?;
+
+    Ok(backup_path)
 }
 
 fn validate_entry(entry: &HistoryEntry) -> Result<(), String> {
@@ -222,6 +332,30 @@ mod tests {
 
     fn cleanup_test_dir(test_dir: &Path) {
         let _ = fs::remove_dir_all(test_dir);
+    }
+
+    fn corrupt_backup_paths(file_path: &Path) -> Vec<PathBuf> {
+        let Some(parent_dir) = file_path.parent() else {
+            return Vec::new();
+        };
+        let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
+            return Vec::new();
+        };
+
+        let mut backups = Vec::new();
+        if let Ok(entries) = fs::read_dir(parent_dir) {
+            for entry in entries.flatten() {
+                if let Some(candidate) = entry.file_name().to_str() {
+                    if candidate.starts_with(&format!("{file_name}.corrupt-"))
+                        && candidate.ends_with(".bak")
+                    {
+                        backups.push(entry.path());
+                    }
+                }
+            }
+        }
+
+        backups
     }
 
     fn test_entry(text: &str, timestamp: &str) -> HistoryEntry {
@@ -384,11 +518,44 @@ mod tests {
 
         fs::write(&file_path, "{ not valid json")
             .expect("test should be able to write malformed json");
-        let error = store
+        let listed = store
             .list_entries(10, 0)
-            .expect_err("malformed json should return an error");
+            .expect("malformed json should be recovered automatically");
 
-        assert!(error.contains("Failed to parse"));
+        assert!(listed.is_empty());
+        assert_eq!(corrupt_backup_paths(&file_path).len(), 1);
+        assert_eq!(
+            fs::read_to_string(&file_path).expect("recovered history file should be readable"),
+            "[]"
+        );
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn list_entries_enforces_max_page_size() {
+        let (store, file_path, test_dir) = create_test_store();
+        let entry_count = MAX_HISTORY_PAGE_SIZE + 5;
+        let entries: Vec<HistoryEntry> = (0..entry_count)
+            .map(|index| HistoryEntry {
+                id: Uuid::new_v4().to_string(),
+                text: format!("entry-{index}"),
+                timestamp: format!("2026-01-01T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
+                duration_secs: None,
+                language: None,
+                provider: "openai".to_string(),
+            })
+            .collect();
+        fs::write(
+            &file_path,
+            serde_json::to_vec_pretty(&entries).expect("entries should serialize"),
+        )
+        .expect("history file should be written");
+
+        let page = store
+            .list_entries(usize::MAX, 0)
+            .expect("list should respect page cap");
+
+        assert_eq!(page.len(), MAX_HISTORY_PAGE_SIZE);
         cleanup_test_dir(&test_dir);
     }
 }
