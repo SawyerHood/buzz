@@ -11,7 +11,10 @@ mod transcription;
 mod voice_pipeline;
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -21,7 +24,7 @@ use audio_capture_service::{
     AUDIO_INPUT_STREAM_ERROR_EVENT,
 };
 use history_store::HistoryStore;
-use hotkey_service::HotkeyService;
+use hotkey_service::{HotkeyService, RecordingTransition};
 use permission_service::PermissionService;
 use serde::Serialize;
 use settings_store::SettingsStore;
@@ -86,29 +89,95 @@ struct AppState {
     services: AppServices,
 }
 
+#[derive(Debug, Clone)]
+struct PipelineRuntimeState {
+    execution_lock: Arc<tokio::sync::Mutex<()>>,
+    next_session_id: Arc<AtomicU64>,
+    active_session_id: Arc<AtomicU64>,
+}
+
+impl Default for PipelineRuntimeState {
+    fn default() -> Self {
+        Self {
+            execution_lock: Arc::new(tokio::sync::Mutex::new(())),
+            next_session_id: Arc::new(AtomicU64::new(0)),
+            active_session_id: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl PipelineRuntimeState {
+    fn begin_session(&self) -> u64 {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.active_session_id.store(session_id, Ordering::Relaxed);
+        session_id
+    }
+
+    fn is_session_active(&self, session_id: u64) -> bool {
+        self.active_session_id.load(Ordering::Relaxed) == session_id
+    }
+}
+
 #[derive(Clone)]
 struct AppPipelineDelegate {
     app: AppHandle,
+    session_id: Option<u64>,
 }
 
 impl AppPipelineDelegate {
     fn new(app: AppHandle) -> Self {
-        Self { app }
+        Self {
+            app,
+            session_id: None,
+        }
+    }
+
+    fn for_session(app: AppHandle, session_id: u64) -> Self {
+        Self {
+            app,
+            session_id: Some(session_id),
+        }
+    }
+
+    fn is_session_active(&self) -> bool {
+        match self.session_id {
+            Some(session_id) => self
+                .app
+                .state::<PipelineRuntimeState>()
+                .is_session_active(session_id),
+            None => true,
+        }
     }
 }
 
 #[async_trait]
 impl VoicePipelineDelegate for AppPipelineDelegate {
     fn set_status(&self, status: AppStatus) {
-        set_status_for_app(&self.app, status);
+        if self.is_session_active() {
+            set_status_for_app(&self.app, status);
+        }
     }
 
     fn emit_transcript(&self, transcript: &str) {
-        emit_transcript_event(&self.app, transcript);
+        if self.is_session_active() {
+            emit_transcript_event(&self.app, transcript);
+        }
     }
 
     fn emit_error(&self, error: &PipelineError) {
-        emit_pipeline_error_event(&self.app, error);
+        if self.is_session_active() {
+            emit_pipeline_error_event(&self.app, error);
+        }
+    }
+
+    fn on_recording_started(&self, success: bool) {
+        let hotkey_service = self.app.state::<HotkeyService>();
+        hotkey_service.acknowledge_transition(RecordingTransition::Started, success);
+    }
+
+    fn on_recording_stopped(&self, success: bool) {
+        let hotkey_service = self.app.state::<HotkeyService>();
+        hotkey_service.acknowledge_transition(RecordingTransition::Stopped, success);
     }
 
     fn start_recording(&self) -> Result<(), String> {
@@ -142,6 +211,10 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
     }
 
     fn insert_text(&self, transcript: &str) -> Result<(), String> {
+        if !self.is_session_active() {
+            return Ok(());
+        }
+
         let state = self.app.state::<AppState>();
         state
             .services
@@ -196,6 +269,9 @@ fn parse_audio_stream_error_message(payload: &str) -> String {
 }
 
 fn handle_audio_input_stream_error(app: &AppHandle, message: String) {
+    let runtime_state = app.state::<PipelineRuntimeState>();
+    runtime_state.begin_session();
+
     let hotkey_service = app.state::<HotkeyService>();
     hotkey_service.force_stop_recording(app);
 
@@ -228,8 +304,12 @@ fn handle_audio_input_stream_error(app: &AppHandle, message: String) {
 fn register_pipeline_handlers(app: &AppHandle) {
     let start_app = app.clone();
     app.listen(hotkey_service::EVENT_RECORDING_STARTED, move |_| {
-        let delegate = AppPipelineDelegate::new(start_app.clone());
+        let app = start_app.clone();
+        let runtime_state = app.state::<PipelineRuntimeState>().inner().clone();
         tauri::async_runtime::spawn(async move {
+            let _guard = runtime_state.execution_lock.lock().await;
+            let session_id = runtime_state.begin_session();
+            let delegate = AppPipelineDelegate::for_session(app.clone(), session_id);
             VoicePipeline::default()
                 .handle_hotkey_started(&delegate)
                 .await;
@@ -238,8 +318,19 @@ fn register_pipeline_handlers(app: &AppHandle) {
 
     let stop_app = app.clone();
     app.listen(hotkey_service::EVENT_RECORDING_STOPPED, move |_| {
-        let delegate = AppPipelineDelegate::new(stop_app.clone());
+        let app = stop_app.clone();
+        let runtime_state = app.state::<PipelineRuntimeState>().inner().clone();
         tauri::async_runtime::spawn(async move {
+            let _guard = runtime_state.execution_lock.lock().await;
+            let session_id = runtime_state.begin_session();
+            let delegate = AppPipelineDelegate::for_session(app.clone(), session_id);
+            let hotkey_service = app.state::<HotkeyService>();
+
+            if !hotkey_service.is_recording() {
+                hotkey_service.acknowledge_transition(RecordingTransition::Stopped, false);
+                return;
+            }
+
             VoicePipeline::default()
                 .handle_hotkey_stopped(&delegate)
                 .await;
@@ -340,14 +431,21 @@ async fn transcribe_audio(
             Ok(transcription.text)
         }
         Err(error) => {
-            let pipeline_error = PipelineError {
-                stage: voice_pipeline::PipelineErrorStage::Transcription,
-                message: error.to_string(),
-            };
-            emit_pipeline_error_event(&app, &pipeline_error);
-            set_status_for_state(&app, &state, AppStatus::Error);
+            let message = error.to_string();
+            let delegate = AppPipelineDelegate::new(app.clone());
+            let pipeline_message = message.clone();
 
-            Err(pipeline_error.message)
+            tauri::async_runtime::spawn(async move {
+                VoicePipeline::default()
+                    .handle_stage_error(
+                        &delegate,
+                        voice_pipeline::PipelineErrorStage::Transcription,
+                        pipeline_message,
+                    )
+                    .await;
+            });
+
+            Err(message)
         }
     }
 }
@@ -394,6 +492,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .manage(HotkeyService::new())
+        .manage(PipelineRuntimeState::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -460,4 +559,20 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PipelineRuntimeState;
+
+    #[test]
+    fn later_session_invalidates_previous_session() {
+        let runtime = PipelineRuntimeState::default();
+
+        let first = runtime.begin_session();
+        let second = runtime.begin_session();
+
+        assert!(!runtime.is_session_active(first));
+        assert!(runtime.is_session_active(second));
+    }
 }

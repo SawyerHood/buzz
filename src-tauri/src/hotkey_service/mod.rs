@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime, State};
@@ -77,6 +80,8 @@ struct HotkeyRuntimeState {
     config: HotkeyConfig,
     registered_shortcut: Option<String>,
     is_recording: bool,
+    desired_recording: bool,
+    pending_transitions: VecDeque<RecordingTransition>,
 }
 
 impl Default for HotkeyRuntimeState {
@@ -85,6 +90,8 @@ impl Default for HotkeyRuntimeState {
             config: HotkeyConfig::default(),
             registered_shortcut: None,
             is_recording: false,
+            desired_recording: false,
+            pending_transitions: VecDeque::new(),
         }
     }
 }
@@ -95,10 +102,39 @@ impl HotkeyRuntimeState {
         shortcut_state: ShortcutState,
     ) -> Option<RecordingTransition> {
         let (next_recording_state, transition) =
-            resolve_transition(self.config.mode, self.is_recording, shortcut_state)?;
+            resolve_transition(self.config.mode, self.desired_recording, shortcut_state)?;
 
-        self.is_recording = next_recording_state;
+        self.desired_recording = next_recording_state;
+        self.pending_transitions.push_back(transition);
         Some(transition)
+    }
+
+    fn acknowledge_transition(&mut self, transition: RecordingTransition, success: bool) {
+        if self.pending_transitions.front().copied() == Some(transition) {
+            self.pending_transitions.pop_front();
+        } else if let Some(index) = self
+            .pending_transitions
+            .iter()
+            .position(|pending| *pending == transition)
+        {
+            self.pending_transitions.remove(index);
+        }
+
+        self.is_recording = match transition {
+            RecordingTransition::Started => success,
+            RecordingTransition::Stopped => false,
+        };
+
+        self.recompute_desired_recording();
+    }
+
+    fn recompute_desired_recording(&mut self) {
+        let mut desired_recording = self.is_recording;
+        for pending_transition in &self.pending_transitions {
+            desired_recording = matches!(pending_transition, RecordingTransition::Started);
+        }
+
+        self.desired_recording = desired_recording;
     }
 }
 
@@ -138,6 +174,12 @@ impl HotkeyService {
             .unwrap_or(false)
     }
 
+    pub fn acknowledge_transition(&self, transition: RecordingTransition, success: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.acknowledge_transition(transition, success);
+        }
+    }
+
     pub fn force_stop_recording<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
         let payload = {
             let mut state = match self.state.lock() {
@@ -145,11 +187,18 @@ impl HotkeyService {
                 Err(_) => return false,
             };
 
-            if !state.is_recording {
+            let was_active = state.is_recording
+                || state.desired_recording
+                || !state.pending_transitions.is_empty();
+
+            if !was_active {
                 return false;
             }
 
             state.is_recording = false;
+            state.desired_recording = false;
+            state.pending_transitions.clear();
+
             RecordingStateChangedEvent {
                 is_recording: false,
                 mode: state.config.mode,
@@ -228,6 +277,8 @@ impl HotkeyService {
             state.config = next_config.clone();
             state.registered_shortcut = Some(next_config.shortcut.clone());
             state.is_recording = false;
+            state.desired_recording = false;
+            state.pending_transitions.clear();
         }
 
         emit_hotkey_config_changed(app, &next_config);
@@ -408,5 +459,51 @@ mod tests {
     #[test]
     fn shortcut_comparison_ignores_case_and_alias_formatting() {
         assert!(shortcuts_match("alt+space", "Alt+Space"));
+    }
+
+    #[test]
+    fn acknowledge_started_failure_rolls_back_to_not_recording() {
+        let mut state = HotkeyRuntimeState::default();
+
+        assert_eq!(
+            state.apply_shortcut_event(ShortcutState::Pressed),
+            Some(RecordingTransition::Started)
+        );
+        assert!(!state.is_recording);
+        assert!(state.desired_recording);
+
+        state.acknowledge_transition(RecordingTransition::Started, false);
+
+        assert!(!state.is_recording);
+        assert!(!state.desired_recording);
+        assert!(state.pending_transitions.is_empty());
+    }
+
+    #[test]
+    fn acknowledge_started_success_marks_recording_as_confirmed() {
+        let mut state = HotkeyRuntimeState::default();
+
+        state.apply_shortcut_event(ShortcutState::Pressed);
+        state.acknowledge_transition(RecordingTransition::Started, true);
+
+        assert!(state.is_recording);
+        assert!(state.desired_recording);
+        assert!(state.pending_transitions.is_empty());
+    }
+
+    #[test]
+    fn desired_state_recomputes_from_pending_transitions() {
+        let mut state = HotkeyRuntimeState::default();
+
+        state.apply_shortcut_event(ShortcutState::Pressed);
+        state.apply_shortcut_event(ShortcutState::Released);
+        state.acknowledge_transition(RecordingTransition::Started, false);
+
+        assert!(!state.is_recording);
+        assert!(!state.desired_recording);
+        assert_eq!(
+            state.pending_transitions,
+            VecDeque::from([RecordingTransition::Stopped])
+        );
     }
 }
