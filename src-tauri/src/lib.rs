@@ -11,7 +11,7 @@ mod transcription;
 
 use std::sync::Mutex;
 
-use audio_capture_service::AudioCaptureService;
+use audio_capture_service::{AudioCaptureService, MicrophoneInfo, RecordedAudio};
 use history_store::HistoryStore;
 use hotkey_service::HotkeyService;
 use permission_service::PermissionService;
@@ -72,6 +72,36 @@ fn set_status(status: AppStatus, state: tauri::State<'_, AppState>) {
     }
 }
 
+#[tauri::command]
+fn list_microphones(state: tauri::State<'_, AppState>) -> Result<Vec<MicrophoneInfo>, String> {
+    state._services._audio_capture_service.list_microphones()
+}
+
+#[tauri::command]
+fn start_recording(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    microphone_id: Option<String>,
+) -> Result<(), String> {
+    state
+        ._services
+        ._audio_capture_service
+        .start_recording(app, microphone_id.as_deref())
+}
+
+#[tauri::command]
+fn stop_recording(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<RecordedAudio, String> {
+    state._services._audio_capture_service.stop_recording(app)
+}
+
+#[tauri::command]
+fn get_audio_level(state: tauri::State<'_, AppState>) -> f32 {
+    state._services._audio_capture_service.get_audio_level()
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -117,8 +147,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let show_item = MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
-            let hide_item = MenuItem::with_id(app, "hide_window", "Hide Voice", true, None::<&str>)?;
+            let show_item =
+                MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
+            let hide_item =
+                MenuItem::with_id(app, "hide_window", "Hide Voice", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Voice", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
 
@@ -150,7 +182,14 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![get_status, set_status])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            set_status,
+            list_microphones,
+            start_recording,
+            stop_recording,
+            get_audio_level
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
