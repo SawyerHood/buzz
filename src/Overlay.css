@@ -81,19 +81,8 @@ body {
   animation: transcribing-pulse 1.25s ease-in-out infinite;
 }
 
-.overlay-transcript-scroll {
-  min-width: 0;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-
-.overlay-transcript-scroll::-webkit-scrollbar {
-  display: none;
-}
-
 .overlay-transcript-text {
+  min-width: 0;
   margin: 0;
   font-size: 12px;
   font-weight: 500;
@@ -101,10 +90,6 @@ body {
   white-space: nowrap;
   line-height: 1.2;
   padding-bottom: 1px;
-}
-
-.overlay-transcript-text.placeholder {
-  color: rgba(207, 223, 243, 0.72);
 }
 
 .overlay-elapsed {

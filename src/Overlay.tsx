@@ -2,25 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { formatElapsedLabel } from "./overlayUtils";
-import {
-  overlayPlaceholder,
-  shouldAppendTranscriptionDelta,
-  type OverlayStatus,
-} from "./overlayTranscriptUtils";
 import "./Overlay.css";
 
-type AppStatus = OverlayStatus;
+type AppStatus = "idle" | "listening" | "transcribing" | "error";
 
 const EVENT_STATUS_CHANGED = "voice://status-changed";
-const EVENT_TRANSCRIPTION_DELTA = "voice://transcription-delta";
 
 function Overlay() {
   const [status, setStatus] = useState<AppStatus>("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const statusRef = useRef<AppStatus>("idle");
   const startedAtRef = useRef<number | null>(null);
-  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -33,7 +25,6 @@ function Overlay() {
 
       if (nextStatus === "listening") {
         if (previousStatus !== "listening") {
-          setTranscriptionPreview("");
           startedAtRef.current = Date.now();
           setElapsedMs(0);
         } else if (startedAtRef.current === null) {
@@ -53,7 +44,6 @@ function Overlay() {
         return;
       }
 
-      setTranscriptionPreview("");
       startedAtRef.current = null;
       setElapsedMs(0);
     };
@@ -75,17 +65,6 @@ function Overlay() {
         const listeners = await Promise.all([
           listen<AppStatus>(EVENT_STATUS_CHANGED, ({ payload }) => {
             applyStatus(payload);
-          }),
-          listen<string>(EVENT_TRANSCRIPTION_DELTA, ({ payload }) => {
-            if (!shouldAppendTranscriptionDelta(statusRef.current)) {
-              return;
-            }
-
-            if (!payload) {
-              return;
-            }
-
-            setTranscriptionPreview((current) => current + payload);
           }),
         ]);
 
@@ -128,15 +107,7 @@ function Overlay() {
 
   const isListening = status === "listening";
   const isTranscribing = status === "transcribing";
-  const placeholder = overlayPlaceholder(status) || "Listening...";
-
-  useEffect(() => {
-    if (!transcriptScrollRef.current) {
-      return;
-    }
-
-    transcriptScrollRef.current.scrollLeft = transcriptScrollRef.current.scrollWidth;
-  }, [status, transcriptionPreview]);
+  const statusLabel = isListening ? "Listening..." : isTranscribing ? "Transcribing..." : "";
 
   return (
     <main className="overlay-root">
@@ -148,11 +119,7 @@ function Overlay() {
         <span className="recording-indicator" aria-hidden="true">
           <span className="recording-dot" />
         </span>
-        <div className="overlay-transcript-scroll" ref={transcriptScrollRef} aria-live="polite">
-          <p className={`overlay-transcript-text ${transcriptionPreview ? "" : "placeholder"}`}>
-            {transcriptionPreview || placeholder}
-          </p>
-        </div>
+        <p className="overlay-transcript-text" aria-live="polite">{statusLabel}</p>
         <p className="overlay-elapsed">{isListening ? formatElapsedLabel(elapsedMs) : "..."}</p>
       </section>
     </main>
