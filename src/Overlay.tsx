@@ -1,50 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import { clampAudioLevel, formatElapsedLabel, pushAudioLevelHistory } from "./overlayUtils";
+import { useEffect, useRef, useState } from "react";
+import { formatElapsedLabel } from "./overlayUtils";
+import {
+  overlayPlaceholder,
+  shouldAppendTranscriptionDelta,
+  type OverlayStatus,
+} from "./overlayTranscriptUtils";
 import "./Overlay.css";
 
-type AppStatus = "idle" | "listening" | "transcribing" | "error";
+type AppStatus = OverlayStatus;
 
-const BAR_COUNT = 22;
-const SMOOTHING_FACTOR = 0.35;
 const EVENT_STATUS_CHANGED = "voice://status-changed";
-const EVENT_OVERLAY_AUDIO_LEVEL = "voice://overlay-audio-level";
 const EVENT_TRANSCRIPTION_DELTA = "voice://transcription-delta";
-
-function emptyHistory(): number[] {
-  return Array.from({ length: BAR_COUNT }, () => 0);
-}
 
 function Overlay() {
   const [status, setStatus] = useState<AppStatus>("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [audioHistory, setAudioHistory] = useState<number[]>(() => emptyHistory());
   const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const statusRef = useRef<AppStatus>("idle");
   const startedAtRef = useRef<number | null>(null);
-  const smoothedHistoryRef = useRef<number[]>(emptyHistory());
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     let unlistenFns: UnlistenFn[] = [];
-
-    const resetHistory = () => {
-      const empty = emptyHistory();
-      smoothedHistoryRef.current = empty;
-      setAudioHistory(empty);
-    };
-
-    const pushSmoothedLevel = (rawLevel: number) => {
-      const normalized = clampAudioLevel(rawLevel);
-      const previousHistory = smoothedHistoryRef.current;
-      const previousLevel = previousHistory[previousHistory.length - 1] ?? 0;
-      const smoothedLevel = previousLevel + (normalized - previousLevel) * SMOOTHING_FACTOR;
-      const nextHistory = pushAudioLevelHistory(previousHistory, smoothedLevel, BAR_COUNT);
-
-      smoothedHistoryRef.current = nextHistory;
-      setAudioHistory(nextHistory);
-    };
 
     const applyStatus = (nextStatus: AppStatus) => {
       const previousStatus = statusRef.current;
@@ -53,7 +33,6 @@ function Overlay() {
 
       if (nextStatus === "listening") {
         if (previousStatus !== "listening") {
-          resetHistory();
           setTranscriptionPreview("");
           startedAtRef.current = Date.now();
           setElapsedMs(0);
@@ -66,40 +45,28 @@ function Overlay() {
       }
 
       if (nextStatus === "transcribing") {
-        if (previousStatus !== "transcribing") {
-          setTranscriptionPreview("");
-        }
-
         if (startedAtRef.current !== null) {
           setElapsedMs(Date.now() - startedAtRef.current);
           startedAtRef.current = null;
         }
 
-        resetHistory();
         return;
       }
 
       setTranscriptionPreview("");
       startedAtRef.current = null;
       setElapsedMs(0);
-      resetHistory();
     };
 
     async function bindOverlayEvents() {
       try {
-        const [initialStatus, initialAudioLevel] = await Promise.all([
-          invoke<AppStatus>("get_status"),
-          invoke<number>("get_audio_level"),
-        ]);
+        const initialStatus = await invoke<AppStatus>("get_status");
 
         if (!isMounted) {
           return;
         }
 
         applyStatus(initialStatus);
-        if (initialStatus === "listening") {
-          pushSmoothedLevel(initialAudioLevel);
-        }
       } catch {
         // Overlay remains passive if backend sync is unavailable.
       }
@@ -109,19 +76,16 @@ function Overlay() {
           listen<AppStatus>(EVENT_STATUS_CHANGED, ({ payload }) => {
             applyStatus(payload);
           }),
-          listen<number>(EVENT_OVERLAY_AUDIO_LEVEL, ({ payload }) => {
-            if (statusRef.current !== "listening") {
-              return;
-            }
-
-            pushSmoothedLevel(payload);
-          }),
           listen<string>(EVENT_TRANSCRIPTION_DELTA, ({ payload }) => {
-            if (statusRef.current !== "transcribing") {
+            if (!shouldAppendTranscriptionDelta(statusRef.current)) {
               return;
             }
 
-            setTranscriptionPreview((current) => current + (payload ?? ""));
+            if (!payload) {
+              return;
+            }
+
+            setTranscriptionPreview((current) => current + payload);
           }),
         ]);
 
@@ -164,6 +128,15 @@ function Overlay() {
 
   const isListening = status === "listening";
   const isTranscribing = status === "transcribing";
+  const placeholder = overlayPlaceholder(status) || "Listening...";
+
+  useEffect(() => {
+    if (!transcriptScrollRef.current) {
+      return;
+    }
+
+    transcriptScrollRef.current.scrollLeft = transcriptScrollRef.current.scrollWidth;
+  }, [status, transcriptionPreview]);
 
   return (
     <main className="overlay-root">
@@ -175,26 +148,12 @@ function Overlay() {
         <span className="recording-indicator" aria-hidden="true">
           <span className="recording-dot" />
         </span>
-
-        {isTranscribing ? (
-          <p className="overlay-transcription-preview">
-            {transcriptionPreview || "Transcribing..."}
+        <div className="overlay-transcript-scroll" ref={transcriptScrollRef} aria-live="polite">
+          <p className={`overlay-transcript-text ${transcriptionPreview ? "" : "placeholder"}`}>
+            {transcriptionPreview || placeholder}
           </p>
-        ) : (
-          <>
-            <div className="overlay-waveform" aria-hidden="true">
-              {audioHistory.map((level, index) => (
-                <span
-                  key={index}
-                  className="overlay-waveform-bar"
-                  style={{ "--level": level } as CSSProperties}
-                />
-              ))}
-            </div>
-
-            <p className="overlay-elapsed">{formatElapsedLabel(elapsedMs)}</p>
-          </>
-        )}
+        </div>
+        <p className="overlay-elapsed">{isListening ? formatElapsedLabel(elapsedMs) : "..."}</p>
       </section>
     </main>
   );
