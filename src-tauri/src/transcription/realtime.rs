@@ -2,16 +2,14 @@ use std::{path::PathBuf, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
+use reqwest::Url;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{self, client::IntoClientRequest, http::HeaderValue, Message},
 };
-use tracing::{debug, info};
-
-#[cfg(not(test))]
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 #[cfg(not(test))]
 use crate::api_key_store::ApiKeyStore;
@@ -20,13 +18,13 @@ use super::{
     normalize_transcript_text, TranscriptionError, TranscriptionOptions, TranscriptionResult,
 };
 
-const DEFAULT_OPENAI_REALTIME_ENDPOINT: &str =
-    "wss://api.openai.com/v1/realtime?intent=transcription";
+const DEFAULT_OPENAI_REALTIME_ENDPOINT: &str = "wss://api.openai.com/v1/realtime";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini-transcribe";
 const DEFAULT_COMMIT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_TURN_THRESHOLD: f32 = 0.5;
 const DEFAULT_SILENCE_DURATION_MS: u64 = 500;
 const REALTIME_OUTPUT_SAMPLE_RATE_HZ: u32 = 24_000;
+const OPENAI_BETA_REALTIME_HEADER_VALUE: &str = "realtime=v1";
 
 const EVENT_SESSION_CREATED: &str = "session.created";
 const EVENT_SESSION_UPDATED: &str = "session.updated";
@@ -138,6 +136,13 @@ impl OpenAiRealtimeTranscriptionClient {
         let runtime_config = self.config.clone();
         tauri::async_runtime::spawn(async move {
             let result = run_realtime_session(runtime_config, api_key, options, command_rx).await;
+            match &result {
+                Ok(transcription) => info!(
+                    transcript_chars = transcription.text.chars().count(),
+                    "realtime transcription session finished successfully"
+                ),
+                Err(error) => warn!(error = %error, "realtime transcription session failed"),
+            }
             let _ = result_tx.send(result);
         });
 
@@ -245,17 +250,33 @@ impl RealtimeTranscriptionSession {
     }
 
     pub async fn commit_and_wait(self) -> Result<TranscriptionResult, TranscriptionError> {
-        self.audio_sender.commit()?;
-        match tokio::time::timeout(self.commit_timeout, self.result_rx).await {
+        let RealtimeTranscriptionSession {
+            audio_sender,
+            result_rx,
+            commit_timeout,
+        } = self;
+
+        if let Err(commit_error) = audio_sender.commit() {
+            warn!(
+                error = %commit_error,
+                "realtime commit command was rejected; waiting for session result"
+            );
+            return match result_rx.await {
+                Ok(result) => result,
+                Err(_) => Err(commit_error),
+            };
+        }
+
+        match tokio::time::timeout(commit_timeout, result_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(TranscriptionError::Network(
                 "Realtime transcription session closed unexpectedly".to_string(),
             )),
             Err(_) => {
-                self.audio_sender.close();
+                audio_sender.close();
                 Err(TranscriptionError::Network(format!(
                     "Timed out waiting for realtime transcription completion after {}s",
-                    self.commit_timeout.as_secs(),
+                    commit_timeout.as_secs(),
                 )))
             }
         }
@@ -293,39 +314,66 @@ async fn run_realtime_session(
     options: TranscriptionOptions,
     mut command_rx: mpsc::UnboundedReceiver<RealtimeCommand>,
 ) -> Result<TranscriptionResult, TranscriptionError> {
-    let protocol_header =
-        format!("realtime,openai-insecure-api-key.{api_key},openai-beta.realtime-v1");
-    let mut request = config
-        .endpoint
-        .clone()
-        .into_client_request()
-        .map_err(|error| {
-            TranscriptionError::Provider(format!(
-                "Invalid realtime websocket endpoint `{}`: {error}",
-                config.endpoint
-            ))
-        })?;
-    let protocol_header_value = HeaderValue::from_str(&protocol_header).map_err(|error| {
+    let endpoint = resolve_realtime_endpoint(&config.endpoint, &config.model)?;
+    let mut request = endpoint.clone().into_client_request().map_err(|error| {
         TranscriptionError::Provider(format!(
-            "Invalid realtime websocket subprotocol header: {error}",
+            "Invalid realtime websocket endpoint `{endpoint}`: {error}",
         ))
     })?;
+    let authorization_header_value =
+        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|error| {
+            TranscriptionError::Provider(format!(
+                "Invalid realtime websocket Authorization header: {error}",
+            ))
+        })?;
     request
         .headers_mut()
-        .insert("Sec-WebSocket-Protocol", protocol_header_value);
+        .insert("Authorization", authorization_header_value);
+    request.headers_mut().insert(
+        "OpenAI-Beta",
+        HeaderValue::from_static(OPENAI_BETA_REALTIME_HEADER_VALUE),
+    );
+
     info!(
-        endpoint = %config.endpoint,
+        endpoint = %endpoint,
         model = %config.model,
         "connecting realtime transcription websocket"
     );
-    let (ws_stream, _) = connect_async(request).await.map_err(map_websocket_error)?;
+    let (ws_stream, response) = connect_async(request).await.map_err(|error| {
+        let mapped = map_websocket_error(error);
+        warn!(
+            endpoint = %endpoint,
+            model = %config.model,
+            error = %mapped,
+            "failed to connect realtime transcription websocket"
+        );
+        mapped
+    })?;
+    info!(
+        endpoint = %endpoint,
+        status = %response.status(),
+        request_id = ?response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok()),
+        negotiated_protocol = ?response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        "connected realtime transcription websocket"
+    );
+
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
 
     let session_update = build_session_update_payload(&config, &options);
     ws_writer
         .send(Message::Text(session_update.to_string().into()))
         .await
-        .map_err(map_websocket_error)?;
+        .map_err(|error| {
+            let mapped = map_websocket_error(error);
+            warn!(error = %mapped, "failed to send realtime session update");
+            mapped
+        })?;
 
     let request_language = normalize_optional_string(options.language.clone());
     let on_delta = options.on_delta.clone();
@@ -363,7 +411,11 @@ async fn run_realtime_session(
                         ws_writer
                             .send(Message::Text(payload.to_string().into()))
                             .await
-                            .map_err(map_websocket_error)?;
+                            .map_err(|error| {
+                                let mapped = map_websocket_error(error);
+                                warn!(error = %mapped, "failed to send realtime audio chunk");
+                                mapped
+                            })?;
                     }
                     RealtimeCommand::Commit => {
                         if commit_sent {
@@ -374,7 +426,11 @@ async fn run_realtime_session(
                         ws_writer
                             .send(Message::Text(payload.to_string().into()))
                             .await
-                            .map_err(map_websocket_error)?;
+                            .map_err(|error| {
+                                let mapped = map_websocket_error(error);
+                                warn!(error = %mapped, "failed to send realtime commit");
+                                mapped
+                            })?;
 
                         if transcript_done.is_some() {
                             break;
@@ -390,9 +446,14 @@ async fn run_realtime_session(
             }
             maybe_message = ws_reader.next() => {
                 let Some(message_result) = maybe_message else {
+                    warn!("realtime websocket stream ended before transcript completion");
                     break;
                 };
-                let message = message_result.map_err(map_websocket_error)?;
+                let message = message_result.map_err(|error| {
+                    let mapped = map_websocket_error(error);
+                    warn!(error = %mapped, "realtime websocket read failed");
+                    mapped
+                })?;
 
                 match message {
                     Message::Text(text) => {
@@ -427,6 +488,7 @@ async fn run_realtime_session(
                                 }
                             }
                             ParsedServerEvent::Error(message) => {
+                                warn!(error_message = %message, "realtime API returned an error event");
                                 return Err(TranscriptionError::Provider(message));
                             }
                             ParsedServerEvent::Ignore => {}
@@ -440,7 +502,12 @@ async fn run_realtime_session(
                             .map_err(map_websocket_error)?;
                     }
                     Message::Pong(_) => {}
-                    Message::Close(_) => {
+                    Message::Close(frame) => {
+                        info!(
+                            close_code = ?frame.as_ref().map(|close| close.code),
+                            close_reason = ?frame.as_ref().map(|close| close.reason.to_string()),
+                            "realtime websocket closed by server"
+                        );
                         break;
                     }
                     Message::Frame(_) => {}
@@ -451,6 +518,10 @@ async fn run_realtime_session(
 
     let final_text = transcript_done.unwrap_or(transcript_from_deltas);
     if final_text.trim().is_empty() {
+        warn!(
+            commit_sent,
+            "realtime session ended without a transcript payload"
+        );
         return Err(TranscriptionError::InvalidResponse(
             "Realtime API did not return a transcript".to_string(),
         ));
@@ -462,6 +533,21 @@ async fn run_realtime_session(
         duration_secs: None,
         confidence: None,
     })
+}
+
+fn resolve_realtime_endpoint(endpoint: &str, model: &str) -> Result<String, TranscriptionError> {
+    let mut url = Url::parse(endpoint).map_err(|error| {
+        TranscriptionError::Provider(format!(
+            "Invalid realtime websocket endpoint `{endpoint}`: {error}",
+        ))
+    })?;
+
+    let has_model = url.query_pairs().any(|(key, _)| key == "model");
+    if !has_model {
+        url.query_pairs_mut().append_pair("model", model);
+    }
+
+    Ok(url.to_string())
 }
 
 fn parse_server_event(payload: &Value) -> ParsedServerEvent {
@@ -522,24 +608,29 @@ fn build_session_update_payload(
     config: &OpenAiRealtimeTranscriptionConfig,
     options: &TranscriptionOptions,
 ) -> Value {
-    let mut transcription = json!({ "model": config.model.clone() });
+    let mut transcription_config = json!({ "model": config.model.clone() });
 
     if let Some(language) = normalize_optional_string(options.language.clone()) {
-        transcription["language"] = Value::String(language);
+        transcription_config["language"] = Value::String(language);
     }
 
     if let Some(prompt) = build_prompt(options.prompt.clone(), options.context_hint.clone()) {
-        transcription["prompt"] = Value::String(prompt);
+        transcription_config["prompt"] = Value::String(prompt);
     }
 
     json!({
         "type": "session.update",
         "session": {
-            "input_audio_transcription": transcription,
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": config.turn_detection_threshold,
-                "silence_duration_ms": config.silence_duration_ms,
+            "type": "realtime.transcription_session",
+            "audio": {
+                "input": {
+                    "transcription": transcription_config,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": config.turn_detection_threshold,
+                        "silence_duration_ms": config.silence_duration_ms,
+                    }
+                }
             }
         }
     })
@@ -639,6 +730,7 @@ fn map_websocket_error(error: tungstenite::Error) -> TranscriptionError {
             }
         }
         tungstenite::Error::Io(io_error) => TranscriptionError::Network(io_error.to_string()),
+        tungstenite::Error::Tls(tls_error) => TranscriptionError::Network(tls_error.to_string()),
         tungstenite::Error::AlreadyClosed | tungstenite::Error::ConnectionClosed => {
             TranscriptionError::Network("Realtime websocket connection closed".to_string())
         }
@@ -679,7 +771,6 @@ mod tests {
         accept_hdr_async,
         tungstenite::{
             handshake::server::{Request, Response},
-            http::HeaderValue,
             Message,
         },
     };
@@ -708,21 +799,34 @@ mod tests {
 
         assert_eq!(payload["type"], Value::String("session.update".to_string()));
         assert_eq!(
-            payload["session"]["input_audio_transcription"]["model"],
+            payload["session"]["audio"]["input"]["transcription"]["model"],
             Value::String(config.model.clone())
         );
         assert_eq!(
-            payload["session"]["input_audio_transcription"]["language"],
+            payload["session"]["audio"]["input"]["transcription"]["language"],
             Value::String("en".to_string())
         );
         assert_eq!(
-            payload["session"]["turn_detection"]["type"],
+            payload["session"]["audio"]["input"]["turn_detection"]["type"],
             Value::String("server_vad".to_string())
         );
         assert_eq!(
-            payload["session"]["turn_detection"]["silence_duration_ms"],
+            payload["session"]["audio"]["input"]["turn_detection"]["silence_duration_ms"],
             Value::from(config.silence_duration_ms)
         );
+    }
+
+    #[test]
+    fn resolve_realtime_endpoint_appends_model_query_parameter() {
+        let endpoint = "wss://api.openai.com/v1/realtime?intent=transcription";
+        let resolved = resolve_realtime_endpoint(endpoint, "gpt-4o-mini-transcribe")
+            .expect("endpoint should parse and include model query");
+        let parsed = Url::parse(&resolved).expect("resolved endpoint should be valid URL");
+        let model = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "model")
+            .map(|(_, value)| value.to_string());
+        assert_eq!(model.as_deref(), Some("gpt-4o-mini-transcribe"));
     }
 
     #[test]
@@ -760,6 +864,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_and_wait_returns_session_error_when_commit_channel_is_closed() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel::<RealtimeCommand>();
+        drop(command_rx);
+        let (result_tx, result_rx) =
+            oneshot::channel::<Result<TranscriptionResult, TranscriptionError>>();
+        let expected_error = TranscriptionError::Authentication(
+            "Realtime websocket authentication failed (HTTP 401 Unauthorized)".to_string(),
+        );
+        result_tx
+            .send(Err(expected_error.clone()))
+            .expect("session result should be sent");
+
+        let session = RealtimeTranscriptionSession {
+            audio_sender: RealtimeAudioSender { command_tx },
+            result_rx,
+            commit_timeout: Duration::from_secs(1),
+        };
+
+        let error = session
+            .commit_and_wait()
+            .await
+            .expect_err("commit should surface the session error");
+        assert_eq!(error, expected_error);
+    }
+
+    #[tokio::test]
     async fn websocket_protocol_flow_sends_session_update_append_and_commit() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -768,8 +898,12 @@ mod tests {
             .local_addr()
             .expect("listener should have local address");
         let endpoint = format!("ws://{address}");
-        let observed_protocol_header = Arc::new(Mutex::new(None::<String>));
-        let protocol_header_for_server = Arc::clone(&observed_protocol_header);
+        let observed_authorization_header = Arc::new(Mutex::new(None::<String>));
+        let authorization_header_for_server = Arc::clone(&observed_authorization_header);
+        let observed_openai_beta_header = Arc::new(Mutex::new(None::<String>));
+        let openai_beta_header_for_server = Arc::clone(&observed_openai_beta_header);
+        let observed_request_uri = Arc::new(Mutex::new(None::<String>));
+        let request_uri_for_server = Arc::clone(&observed_request_uri);
 
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener
@@ -777,19 +911,31 @@ mod tests {
                 .await
                 .expect("server should accept connection");
             let ws_stream =
-                accept_hdr_async(stream, move |request: &Request, mut response: Response| {
-                    let header = request
+                accept_hdr_async(stream, move |request: &Request, response: Response| {
+                    let authorization_header = request
                         .headers()
-                        .get("Sec-WebSocket-Protocol")
+                        .get("Authorization")
                         .and_then(|value| value.to_str().ok())
                         .map(|value| value.to_string());
-                    *protocol_header_for_server
+                    *authorization_header_for_server
                         .lock()
-                        .expect("protocol header lock should not be poisoned") = header;
-                    response.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        HeaderValue::from_static("realtime"),
-                    );
+                        .expect("authorization header lock should not be poisoned") =
+                        authorization_header;
+
+                    let openai_beta_header = request
+                        .headers()
+                        .get("OpenAI-Beta")
+                        .and_then(|value| value.to_str().ok())
+                        .map(|value| value.to_string());
+                    *openai_beta_header_for_server
+                        .lock()
+                        .expect("beta header lock should not be poisoned") = openai_beta_header;
+
+                    *request_uri_for_server
+                        .lock()
+                        .expect("request URI lock should not be poisoned") =
+                        Some(request.uri().to_string());
+
                     Ok(response)
                 })
                 .await
@@ -895,13 +1041,25 @@ mod tests {
                 .as_str(),
             "hello "
         );
-        let protocol_header = observed_protocol_header
+        let authorization_header = observed_authorization_header
             .lock()
-            .expect("protocol header lock should not be poisoned")
+            .expect("authorization header lock should not be poisoned")
             .clone()
             .unwrap_or_default();
-        assert!(protocol_header.contains("realtime"));
-        assert!(protocol_header.contains("openai-insecure-api-key.test-key"));
-        assert!(protocol_header.contains("openai-beta.realtime-v1"));
+        assert_eq!(authorization_header, "Bearer test-key");
+
+        let beta_header = observed_openai_beta_header
+            .lock()
+            .expect("beta header lock should not be poisoned")
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(beta_header, "realtime=v1");
+
+        let request_uri = observed_request_uri
+            .lock()
+            .expect("request URI lock should not be poisoned")
+            .clone()
+            .unwrap_or_default();
+        assert!(request_uri.contains("model=gpt-4o-mini-transcribe"));
     }
 }

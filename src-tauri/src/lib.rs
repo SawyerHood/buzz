@@ -13,7 +13,7 @@ mod voice_pipeline;
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -537,9 +537,21 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         let chunk_callback: Option<AudioInputChunkCallback> =
             realtime_session.as_ref().map(|session| {
                 let audio_sender = session.audio_sender();
+                let append_error_logged = Arc::new(AtomicBool::new(false));
+                let append_error_logged_for_callback = Arc::clone(&append_error_logged);
+                let session_id = self.session_id;
                 Arc::new(move |chunk: AudioInputChunk| {
-                    let _ = audio_sender
-                        .append_pcm16_mono(chunk.pcm16_mono_samples, chunk.sample_rate_hz);
+                    if let Err(error) = audio_sender
+                        .append_pcm16_mono(chunk.pcm16_mono_samples, chunk.sample_rate_hz)
+                    {
+                        if !append_error_logged_for_callback.swap(true, Ordering::Relaxed) {
+                            warn!(
+                                session_id = ?session_id,
+                                error = %error,
+                                "failed to forward audio chunk to realtime transcription session"
+                            );
+                        }
+                    }
                 }) as AudioInputChunkCallback
             });
 
