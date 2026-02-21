@@ -686,7 +686,10 @@ mod tests {
 
     use crate::{
         status_notifier::AppStatus,
-        voice_pipeline::{PipelineError, PipelineErrorStage, VoicePipeline, VoicePipelineDelegate},
+        voice_pipeline::{
+            PipelineError, PipelineErrorStage, PipelineTranscript, VoicePipeline,
+            VoicePipelineDelegate,
+        },
     };
 
     use super::{
@@ -816,7 +819,7 @@ mod tests {
             Ok(vec![1, 2, 3])
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<String, String> {
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
             if let Some(started_tx) = self
                 .transcribe_started_tx
                 .lock()
@@ -830,7 +833,12 @@ mod tests {
                 blocker.notified().await;
             }
 
-            Ok(self.transcript.clone())
+            Ok(PipelineTranscript {
+                text: self.transcript.clone(),
+                duration_secs: None,
+                language: None,
+                provider: "test".to_string(),
+            })
         }
 
         fn insert_text(&self, transcript: &str) -> Result<(), String> {
@@ -915,7 +923,7 @@ mod tests {
             Ok(vec![4, 5, 6])
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<String, String> {
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
             Err("provider unavailable".to_string())
         }
 
@@ -976,8 +984,13 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<String, String> {
-            Ok(String::new())
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+            Ok(PipelineTranscript {
+                text: String::new(),
+                duration_secs: None,
+                language: None,
+                provider: "test".to_string(),
+            })
         }
 
         fn insert_text(&self, _transcript: &str) -> Result<(), String> {

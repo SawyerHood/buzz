@@ -423,7 +423,10 @@ mod tests {
 
     use crate::{
         status_notifier::AppStatus,
-        voice_pipeline::{PipelineError, PipelineErrorStage, VoicePipeline, VoicePipelineDelegate},
+        voice_pipeline::{
+            PipelineError, PipelineErrorStage, PipelineTranscript, VoicePipeline,
+            VoicePipelineDelegate,
+        },
     };
 
     use super::*;
@@ -496,7 +499,7 @@ mod tests {
             panic!("stop should not be called for start failure scenario");
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<String, String> {
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
             panic!("transcribe should not be called for start failure scenario");
         }
 
