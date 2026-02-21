@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
+#[cfg(not(test))]
 use crate::api_key_store::ApiKeyStore;
 
 use super::{
@@ -132,24 +133,27 @@ impl OpenAiTranscriptionProvider {
             return Ok(explicit_key);
         }
 
-        match ApiKeyStore::new().get_api_key(self.name()) {
-            Ok(Some(keychain_key)) => {
-                debug!("using OpenAI API key from keychain");
-                return Ok(keychain_key);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                if let Some(env_key) = read_non_empty_env("OPENAI_API_KEY") {
-                    warn!(
-                        error = %error,
-                        "falling back to OPENAI_API_KEY environment variable after keychain read failure"
-                    );
-                    return Ok(env_key);
+        #[cfg(not(test))]
+        {
+            match ApiKeyStore::new().get_api_key(self.name()) {
+                Ok(Some(keychain_key)) => {
+                    debug!("using OpenAI API key from keychain");
+                    return Ok(keychain_key);
                 }
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(env_key) = read_non_empty_env("OPENAI_API_KEY") {
+                        warn!(
+                            error = %error,
+                            "falling back to OPENAI_API_KEY environment variable after keychain read failure"
+                        );
+                        return Ok(env_key);
+                    }
 
-                return Err(TranscriptionError::Provider(format!(
-                    "Unable to read API key from macOS keychain: {error}",
-                )));
+                    return Err(TranscriptionError::Provider(format!(
+                        "Unable to read API key from macOS keychain: {error}",
+                    )));
+                }
             }
         }
 

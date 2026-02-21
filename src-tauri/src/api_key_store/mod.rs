@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tracing::{debug, info, warn};
 
 use crate::settings_store::DEFAULT_TRANSCRIPTION_PROVIDER;
@@ -10,6 +13,7 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 #[derive(Debug, Clone)]
 pub struct ApiKeyStore {
     backend: Arc<dyn ApiKeyBackend>,
+    cache: Arc<Mutex<HashMap<String, Option<String>>>>,
 }
 
 impl Default for ApiKeyStore {
@@ -23,18 +27,29 @@ impl ApiKeyStore {
         debug!("api key store initialized");
         Self {
             backend: Arc::new(SystemKeychainBackend),
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     #[cfg(test)]
     fn with_backend(backend: Arc<dyn ApiKeyBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn get_api_key(&self, provider: &str) -> Result<Option<String>, String> {
         let account = normalize_provider(provider)?;
+        if let Some(cached) = self.get_cached_api_key(account.as_str())? {
+            debug!(provider = %account, "api key served from in-memory cache");
+            return Ok(cached);
+        }
+
         debug!(provider = %account, "reading api key from store");
-        self.backend.get(KEYCHAIN_SERVICE, account.as_str())
+        let key = self.backend.get(KEYCHAIN_SERVICE, account.as_str())?;
+        self.set_cached_api_key(account.as_str(), key.clone())?;
+        Ok(key)
     }
 
     pub fn has_api_key(&self, provider: &str) -> Result<bool, String> {
@@ -46,13 +61,41 @@ impl ApiKeyStore {
         let normalized_key = normalize_api_key(key)?;
         info!(provider = %account, "writing api key to store");
         self.backend
-            .set(KEYCHAIN_SERVICE, account.as_str(), normalized_key.as_str())
+            .set(KEYCHAIN_SERVICE, account.as_str(), normalized_key.as_str())?;
+        self.set_cached_api_key(account.as_str(), Some(normalized_key))
     }
 
     pub fn delete_api_key(&self, provider: &str) -> Result<(), String> {
         let account = normalize_provider(provider)?;
         info!(provider = %account, "deleting api key from store");
-        self.backend.delete(KEYCHAIN_SERVICE, account.as_str())
+        self.backend.delete(KEYCHAIN_SERVICE, account.as_str())?;
+        self.clear_cached_api_key(account.as_str())
+    }
+
+    fn get_cached_api_key(&self, provider: &str) -> Result<Option<Option<String>>, String> {
+        let guard = self
+            .cache
+            .lock()
+            .map_err(|_| "api key cache lock poisoned".to_string())?;
+        Ok(guard.get(provider).cloned())
+    }
+
+    fn set_cached_api_key(&self, provider: &str, key: Option<String>) -> Result<(), String> {
+        let mut guard = self
+            .cache
+            .lock()
+            .map_err(|_| "api key cache lock poisoned".to_string())?;
+        guard.insert(provider.to_string(), key);
+        Ok(())
+    }
+
+    fn clear_cached_api_key(&self, provider: &str) -> Result<(), String> {
+        let mut guard = self
+            .cache
+            .lock()
+            .map_err(|_| "api key cache lock poisoned".to_string())?;
+        guard.remove(provider);
+        Ok(())
     }
 }
 
@@ -177,7 +220,10 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -190,6 +236,49 @@ mod tests {
 
     impl ApiKeyBackend for InMemoryBackend {
         fn get(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            let guard = self
+                .map
+                .lock()
+                .map_err(|_| "backend lock poisoned".to_string())?;
+            Ok(guard
+                .get(&(service.to_string(), account.to_string()))
+                .cloned())
+        }
+
+        fn set(&self, service: &str, account: &str, key: &str) -> Result<(), String> {
+            let mut guard = self
+                .map
+                .lock()
+                .map_err(|_| "backend lock poisoned".to_string())?;
+            guard.insert((service.to_string(), account.to_string()), key.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, service: &str, account: &str) -> Result<(), String> {
+            let mut guard = self
+                .map
+                .lock()
+                .map_err(|_| "backend lock poisoned".to_string())?;
+            guard.remove(&(service.to_string(), account.to_string()));
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingBackend {
+        map: Mutex<HashMap<(String, String), String>>,
+        get_calls: AtomicUsize,
+    }
+
+    impl CountingBackend {
+        fn get_call_count(&self) -> usize {
+            self.get_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ApiKeyBackend for CountingBackend {
+        fn get(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
             let guard = self
                 .map
                 .lock()
@@ -288,6 +377,96 @@ mod tests {
         assert!(store.has_api_key("gemini").is_err());
         assert!(store.set_api_key("azure-openai", "sk-test").is_err());
         assert!(store.delete_api_key("custom").is_err());
+    }
+
+    #[test]
+    fn caches_backend_get_results_per_provider() {
+        let backend = Arc::new(CountingBackend::default());
+        backend
+            .set(KEYCHAIN_SERVICE, "openai", "sk-cached")
+            .expect("seed should succeed");
+        let store = ApiKeyStore::with_backend(backend.clone());
+
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("first get should succeed")
+                .as_deref(),
+            Some("sk-cached")
+        );
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("second get should succeed")
+                .as_deref(),
+            Some("sk-cached")
+        );
+        assert_eq!(
+            backend.get_call_count(),
+            1,
+            "expected backend read to happen once due to in-memory cache"
+        );
+    }
+
+    #[test]
+    fn caches_missing_api_keys() {
+        let backend = Arc::new(CountingBackend::default());
+        let store = ApiKeyStore::with_backend(backend.clone());
+
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("first get should succeed for missing value"),
+            None
+        );
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("second get should succeed for missing value"),
+            None
+        );
+        assert_eq!(
+            backend.get_call_count(),
+            1,
+            "expected missing key result to be cached"
+        );
+    }
+
+    #[test]
+    fn set_and_delete_keep_cache_in_sync() {
+        let backend = Arc::new(CountingBackend::default());
+        let store = ApiKeyStore::with_backend(backend.clone());
+
+        store
+            .set_api_key("openai", "sk-updated")
+            .expect("set should succeed");
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("get after set should succeed")
+                .as_deref(),
+            Some("sk-updated")
+        );
+        assert_eq!(
+            backend.get_call_count(),
+            0,
+            "expected get after set to come from cache"
+        );
+
+        store
+            .delete_api_key("openai")
+            .expect("delete should succeed");
+        assert_eq!(
+            store
+                .get_api_key("openai")
+                .expect("get after delete should succeed"),
+            None
+        );
+        assert_eq!(
+            backend.get_call_count(),
+            1,
+            "expected backend read after delete because cache entry is removed"
+        );
     }
 
     #[cfg(target_os = "macos")]
