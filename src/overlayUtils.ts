@@ -3,11 +3,11 @@ export function clampAudioLevel(value: number): number {
     return 0;
   }
 
-  // Raw mic levels are typically 0.0–0.15 for normal speech.
-  // Amplify with gain + sqrt curve so bars are visually responsive.
+  // Raw backend levels are usually 0.0-0.2 for normal speech.
+  // Apply a gentler gain/curve so quiet speech stays small and loud peaks can still max out.
   const clamped = Math.max(0, Math.min(1, value));
-  const gained = Math.min(1, clamped * 6);
-  return Math.sqrt(gained);
+  const gained = Math.min(1, clamped * 2.5);
+  return Math.pow(gained, 0.7);
 }
 
 export function pushAudioLevelHistory(
@@ -16,9 +16,9 @@ export function pushAudioLevelHistory(
   maxLength: number,
 ): number[] {
   const boundedLength = Math.max(1, Math.floor(maxLength));
-  const normalized = clampAudioLevel(value);
+  const safeValue = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   const next = history.slice(-(boundedLength - 1));
-  next.push(normalized);
+  next.push(safeValue);
 
   while (next.length < boundedLength) {
     next.unshift(0);
