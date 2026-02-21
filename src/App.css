@@ -85,25 +85,59 @@ h1 {
   box-shadow: 0 0 0 2px rgba(177, 63, 63, 0.2);
 }
 
-.controls {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.55rem;
+.audio-level-card,
+.transcript-card {
+  border-radius: 12px;
+  border: 1px solid #d8d8d8;
+  background: #ffffff;
+  padding: 0.9rem;
 }
 
-button {
-  border: 1px solid #bcbcbc;
-  border-radius: 10px;
-  background: #fafafa;
-  color: #1b1b1b;
-  padding: 0.55rem 0.65rem;
-  font-size: 0.86rem;
-  font-weight: 550;
-  cursor: pointer;
+.card-title {
+  margin: 0;
+  font-size: 0.84rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #5f5f5f;
 }
 
-button:hover {
-  border-color: #8a8a8a;
+.audio-meter-track {
+  margin-top: 0.65rem;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e7e7e7;
+}
+
+.audio-meter-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: #a6a6a6;
+  transition: width 60ms linear, background-color 120ms ease;
+}
+
+.audio-meter-fill.active {
+  background: linear-gradient(90deg, #2f7fda 0%, #2cab6e 100%);
+}
+
+.audio-meter-value {
+  margin: 0.5rem 0 0;
+  font-size: 0.84rem;
+  color: #444444;
+}
+
+.transcript-value,
+.transcript-placeholder {
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.transcript-placeholder {
+  color: #7a7a7a;
+  font-style: italic;
 }
 
 .backend-sync {

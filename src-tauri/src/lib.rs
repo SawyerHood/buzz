@@ -8,23 +8,44 @@ mod settings_store;
 mod status_notifier;
 mod text_insertion_service;
 mod transcription;
+mod voice_pipeline;
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use audio_capture_service::{AudioCaptureService, MicrophoneInfo, RecordedAudio};
 use history_store::HistoryStore;
 use hotkey_service::HotkeyService;
 use permission_service::PermissionService;
+use serde::Serialize;
 use settings_store::SettingsStore;
 use status_notifier::{AppStatus, StatusNotifier};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Listener, Manager,
 };
 use text_insertion_service::TextInsertionService;
 use transcription::openai::{OpenAiTranscriptionConfig, OpenAiTranscriptionProvider};
 use transcription::{TranscriptionOptions, TranscriptionOrchestrator};
+use voice_pipeline::{PipelineError, VoicePipeline, VoicePipelineDelegate};
+
+const EVENT_STATUS_CHANGED: &str = "voice://status-changed";
+const EVENT_TRANSCRIPT_READY: &str = "voice://transcript-ready";
+const EVENT_PIPELINE_ERROR: &str = "voice://pipeline-error";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptReadyEvent {
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PipelineErrorEvent {
+    stage: String,
+    message: String,
+}
 
 #[derive(Debug)]
 struct AppServices {
@@ -58,8 +79,71 @@ struct AppState {
     services: AppServices,
 }
 
-#[tauri::command]
-fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
+#[derive(Clone)]
+struct AppPipelineDelegate {
+    app: AppHandle,
+}
+
+impl AppPipelineDelegate {
+    fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait]
+impl VoicePipelineDelegate for AppPipelineDelegate {
+    fn set_status(&self, status: AppStatus) {
+        set_status_for_app(&self.app, status);
+    }
+
+    fn emit_transcript(&self, transcript: &str) {
+        emit_transcript_event(&self.app, transcript);
+    }
+
+    fn emit_error(&self, error: &PipelineError) {
+        emit_pipeline_error_event(&self.app, error);
+    }
+
+    fn start_recording(&self) -> Result<(), String> {
+        let state = self.app.state::<AppState>();
+        state
+            .services
+            .audio_capture_service
+            .start_recording(self.app.clone(), None)
+    }
+
+    fn stop_recording(&self) -> Result<Vec<u8>, String> {
+        let state = self.app.state::<AppState>();
+        state
+            .services
+            .audio_capture_service
+            .stop_recording(self.app.clone())
+            .map(|recorded| recorded.wav_bytes)
+    }
+
+    async fn transcribe(&self, wav_bytes: Vec<u8>) -> Result<String, String> {
+        let orchestrator = {
+            let state = self.app.state::<AppState>();
+            state.services.transcription_orchestrator.clone()
+        };
+
+        orchestrator
+            .transcribe(wav_bytes, TranscriptionOptions::default())
+            .await
+            .map(|transcription| transcription.text)
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_text(&self, transcript: &str) -> Result<(), String> {
+        let state = self.app.state::<AppState>();
+        state
+            .services
+            .text_insertion_service
+            .insert_text(transcript)
+    }
+}
+
+fn get_status_from_state(state: &AppState) -> AppStatus {
     state
         .status_notifier
         .lock()
@@ -67,11 +151,65 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         .unwrap_or(AppStatus::Error)
 }
 
-#[tauri::command]
-fn set_status(status: AppStatus, state: tauri::State<'_, AppState>) {
+fn set_status_for_state(app: &AppHandle, state: &AppState, status: AppStatus) {
     if let Ok(mut notifier) = state.status_notifier.lock() {
         notifier.set(status);
     }
+
+    let _ = app.emit(EVENT_STATUS_CHANGED, status);
+}
+
+fn set_status_for_app(app: &AppHandle, status: AppStatus) {
+    let state = app.state::<AppState>();
+    set_status_for_state(app, &state, status);
+}
+
+fn emit_transcript_event(app: &AppHandle, transcript: &str) {
+    let payload = TranscriptReadyEvent {
+        text: transcript.to_string(),
+    };
+    let _ = app.emit(EVENT_TRANSCRIPT_READY, payload);
+}
+
+fn emit_pipeline_error_event(app: &AppHandle, error: &PipelineError) {
+    let payload = PipelineErrorEvent {
+        stage: error.stage.as_str().to_string(),
+        message: error.message.clone(),
+    };
+
+    let _ = app.emit(EVENT_PIPELINE_ERROR, payload);
+}
+
+fn register_pipeline_handlers(app: &AppHandle) {
+    let start_app = app.clone();
+    app.listen(hotkey_service::EVENT_RECORDING_STARTED, move |_| {
+        let delegate = AppPipelineDelegate::new(start_app.clone());
+        tauri::async_runtime::spawn(async move {
+            VoicePipeline::default()
+                .handle_hotkey_started(&delegate)
+                .await;
+        });
+    });
+
+    let stop_app = app.clone();
+    app.listen(hotkey_service::EVENT_RECORDING_STOPPED, move |_| {
+        let delegate = AppPipelineDelegate::new(stop_app.clone());
+        tauri::async_runtime::spawn(async move {
+            VoicePipeline::default()
+                .handle_hotkey_stopped(&delegate)
+                .await;
+        });
+    });
+}
+
+#[tauri::command]
+fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
+    get_status_from_state(&state)
+}
+
+#[tauri::command]
+fn set_status(app: AppHandle, status: AppStatus, state: tauri::State<'_, AppState>) {
+    set_status_for_state(&app, &state, status);
 }
 
 #[tauri::command]
@@ -85,10 +223,16 @@ fn start_recording(
     state: tauri::State<'_, AppState>,
     microphone_id: Option<String>,
 ) -> Result<(), String> {
-    state
+    let result = state
         .services
         .audio_capture_service
-        .start_recording(app, microphone_id.as_deref())
+        .start_recording(app.clone(), microphone_id.as_deref());
+
+    if result.is_ok() {
+        set_status_for_state(&app, &state, AppStatus::Listening);
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -96,7 +240,13 @@ fn stop_recording(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<RecordedAudio, String> {
-    state.services.audio_capture_service.stop_recording(app)
+    let recorded = state
+        .services
+        .audio_capture_service
+        .stop_recording(app.clone())?;
+
+    set_status_for_state(&app, &state, AppStatus::Idle);
+    Ok(recorded)
 }
 
 #[tauri::command]
@@ -111,18 +261,20 @@ fn insert_text(text: String, state: tauri::State<'_, AppState>) -> Result<(), St
 
 #[tauri::command]
 fn copy_to_clipboard(text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.services.text_insertion_service.copy_to_clipboard(&text)
+    state
+        .services
+        .text_insertion_service
+        .copy_to_clipboard(&text)
 }
 
 #[tauri::command]
 async fn transcribe_audio(
+    app: AppHandle,
     audio_bytes: Vec<u8>,
     options: Option<TranscriptionOptions>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    if let Ok(mut notifier) = state.status_notifier.lock() {
-        notifier.set(AppStatus::Transcribing);
-    }
+    set_status_for_state(&app, &state, AppStatus::Transcribing);
 
     let result = state
         .services
@@ -132,18 +284,19 @@ async fn transcribe_audio(
 
     match result {
         Ok(transcription) => {
-            if let Ok(mut notifier) = state.status_notifier.lock() {
-                notifier.set(AppStatus::Idle);
-            }
+            set_status_for_state(&app, &state, AppStatus::Idle);
 
             Ok(transcription.text)
         }
         Err(error) => {
-            if let Ok(mut notifier) = state.status_notifier.lock() {
-                notifier.set(AppStatus::Error);
-            }
+            let pipeline_error = PipelineError {
+                stage: voice_pipeline::PipelineErrorStage::Transcription,
+                message: error.to_string(),
+            };
+            emit_pipeline_error_event(&app, &pipeline_error);
+            set_status_for_state(&app, &state, AppStatus::Error);
 
-            Err(error.to_string())
+            Err(pipeline_error.message)
         }
     }
 }
@@ -201,6 +354,9 @@ pub fn run() {
             hotkey_service
                 .register_default_shortcut(app.handle())
                 .map_err(std::io::Error::other)?;
+
+            register_pipeline_handlers(app.handle());
+            set_status_for_app(app.handle(), AppStatus::Idle);
 
             let show_item =
                 MenuItem::with_id(app, "show_window", "Open Voice", true, None::<&str>)?;
