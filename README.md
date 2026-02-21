@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/header.png" alt="Buzz - Voice to text with a quick buzz" width="100%" />
+</p>
+
 # Buzz 🐝
 
 Voice-to-text with a quick buzz.
