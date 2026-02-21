@@ -462,6 +462,10 @@ fn truncate_response_body(value: String) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
     #[test]
     fn extracts_chatgpt_account_id_from_jwt_claims() {
@@ -533,5 +537,41 @@ mod tests {
             query.get("originator").map(String::as_str),
             Some(OAUTH_ORIGINATOR)
         );
+    }
+
+    #[tokio::test]
+    async fn callback_listener_accepts_code_and_matching_state() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind callback listener");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let callback_task =
+            tokio::spawn(async move { wait_for_callback(listener, "expected_state").await });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect to callback listener");
+        let request = "GET /auth/callback?code=test_code&state=expected_state HTTP/1.1\r\n\
+Host: localhost\r\n\
+Connection: close\r\n\
+\r\n";
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write callback request");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read callback response");
+        assert!(response.contains("200 OK"));
+
+        let payload = callback_task
+            .await
+            .expect("callback task join")
+            .expect("callback payload");
+        assert_eq!(payload.code, "test_code");
     }
 }
