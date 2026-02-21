@@ -132,10 +132,6 @@ impl TextInsertionService {
         info!(chars = text.chars().count(), "copy to clipboard requested");
         insert_text_with_backend(&self.backend, text, InsertionMode::CopyOnly)
     }
-
-    pub fn insert_text_with_mode(&self, text: &str, mode: InsertionMode) -> Result<(), String> {
-        insert_text_with_backend(&self.backend, text, mode)
-    }
 }
 
 fn insert_text_with_backend<B: InsertionBackend>(

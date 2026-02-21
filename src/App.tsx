@@ -277,7 +277,9 @@ function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [audioLevel, setAudioLevel] = useState(0);
   const [lastTranscript, setLastTranscript] = useState("");
+  const [historyRefreshSignal, setHistoryRefreshSignal] = useState(0);
   const [backendSynced, setBackendSynced] = useState<boolean>(true);
+  const activeTabRef = useRef<AppTab>(activeTab);
 
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [permissionErrorMessage, setPermissionErrorMessage] = useState("");
@@ -332,6 +334,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
     let isMounted = true;
     let unlistenFns: UnlistenFn[] = [];
 
@@ -381,6 +387,9 @@ function App() {
           }),
           listen<TranscriptReadyEvent>("voice://transcript-ready", ({ payload }) => {
             setLastTranscript(payload.text ?? "");
+            if (activeTabRef.current === "history") {
+              setHistoryRefreshSignal((current) => current + 1);
+            }
           }),
           listen<PipelineErrorEvent>("voice://pipeline-error", ({ payload }) => {
             setErrorMessage(payload.message || "An unexpected pipeline error occurred.");
@@ -493,7 +502,7 @@ function App() {
             statusDescription={statusDescription}
           />
         ) : null}
-        {activeTab === "history" ? <HistoryPanel /> : null}
+        {activeTab === "history" ? <HistoryPanel refreshSignal={historyRefreshSignal} /> : null}
         {activeTab === "settings" ? <Settings /> : null}
       </section>
 

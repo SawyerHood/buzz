@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   formatDuration,
@@ -25,7 +25,11 @@ function toErrorMessage(error: unknown, fallbackMessage: string): string {
   return fallbackMessage;
 }
 
-function HistoryPanel() {
+type HistoryPanelProps = {
+  refreshSignal?: number;
+};
+
+function HistoryPanel({ refreshSignal = 0 }: HistoryPanelProps) {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
@@ -35,6 +39,7 @@ function HistoryPanel() {
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
+  const previousRefreshSignal = useRef(refreshSignal);
 
   const loadEntries = useCallback(async (nextOffset: number, replace: boolean) => {
     setIsLoading(true);
@@ -71,6 +76,15 @@ function HistoryPanel() {
   useEffect(() => {
     void refreshHistory();
   }, [refreshHistory]);
+
+  useEffect(() => {
+    if (previousRefreshSignal.current === refreshSignal) {
+      return;
+    }
+
+    previousRefreshSignal.current = refreshSignal;
+    void refreshHistory();
+  }, [refreshHistory, refreshSignal]);
 
   const runEntryAction = useCallback(
     async (

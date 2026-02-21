@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod api_key_store;
 mod audio_capture_service;
 mod history_store;

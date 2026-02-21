@@ -22,13 +22,6 @@ pub struct StatusNotifier {
 }
 
 impl StatusNotifier {
-    pub fn new() -> Self {
-        debug!("status notifier initialized");
-        Self {
-            current: AppStatus::Idle,
-        }
-    }
-
     pub fn current(&self) -> AppStatus {
         self.current
     }
