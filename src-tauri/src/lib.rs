@@ -1455,6 +1455,8 @@ pub fn run() {
             let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
 
             tauri::tray::TrayIconBuilder::with_id("voice-tray")
+                .icon(app.default_window_icon().cloned().expect("default icon"))
+                .icon_as_template(true)
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
