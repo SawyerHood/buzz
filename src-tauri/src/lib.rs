@@ -11,7 +11,7 @@ mod transcription;
 
 use std::sync::{Arc, Mutex};
 
-use audio_capture_service::AudioCaptureService;
+use audio_capture_service::{AudioCaptureService, MicrophoneInfo, RecordedAudio};
 use history_store::HistoryStore;
 use hotkey_service::HotkeyService;
 use permission_service::PermissionService;
@@ -28,9 +28,9 @@ use transcription::{TranscriptionOptions, TranscriptionOrchestrator};
 
 #[derive(Debug)]
 struct AppServices {
-    _audio_capture_service: AudioCaptureService,
+    audio_capture_service: AudioCaptureService,
     transcription_orchestrator: TranscriptionOrchestrator,
-    _text_insertion_service: TextInsertionService,
+    text_insertion_service: TextInsertionService,
     _settings_store: SettingsStore,
     _history_store: HistoryStore,
     _permission_service: PermissionService,
@@ -42,9 +42,9 @@ impl Default for AppServices {
         let transcription_orchestrator = TranscriptionOrchestrator::new(Arc::new(provider));
 
         Self {
-            _audio_capture_service: AudioCaptureService::new(),
+            audio_capture_service: AudioCaptureService::new(),
             transcription_orchestrator,
-            _text_insertion_service: TextInsertionService::new(),
+            text_insertion_service: TextInsertionService::new(),
             _settings_store: SettingsStore::new(),
             _history_store: HistoryStore::new(),
             _permission_service: PermissionService::new(),
@@ -75,13 +75,43 @@ fn set_status(status: AppStatus, state: tauri::State<'_, AppState>) {
 }
 
 #[tauri::command]
+fn list_microphones(state: tauri::State<'_, AppState>) -> Result<Vec<MicrophoneInfo>, String> {
+    state.services.audio_capture_service.list_microphones()
+}
+
+#[tauri::command]
+fn start_recording(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    microphone_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .services
+        .audio_capture_service
+        .start_recording(app, microphone_id.as_deref())
+}
+
+#[tauri::command]
+fn stop_recording(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<RecordedAudio, String> {
+    state.services.audio_capture_service.stop_recording(app)
+}
+
+#[tauri::command]
+fn get_audio_level(state: tauri::State<'_, AppState>) -> f32 {
+    state.services.audio_capture_service.get_audio_level()
+}
+
+#[tauri::command]
 fn insert_text(text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.services._text_insertion_service.insert_text(&text)
+    state.services.text_insertion_service.insert_text(&text)
 }
 
 #[tauri::command]
 fn copy_to_clipboard(text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.services._text_insertion_service.copy_to_clipboard(&text)
+    state.services.text_insertion_service.copy_to_clipboard(&text)
 }
 
 #[tauri::command]
@@ -210,6 +240,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             set_status,
+            list_microphones,
+            start_recording,
+            stop_recording,
+            get_audio_level,
             insert_text,
             copy_to_clipboard,
             transcribe_audio,
