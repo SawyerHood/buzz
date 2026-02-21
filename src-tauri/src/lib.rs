@@ -9,7 +9,7 @@ mod status_notifier;
 mod text_insertion_service;
 mod transcription;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use audio_capture_service::AudioCaptureService;
 use history_store::HistoryStore;
@@ -23,12 +23,13 @@ use tauri::{
     AppHandle, Manager,
 };
 use text_insertion_service::TextInsertionService;
-use transcription::openai::OpenAiTranscriptionProvider;
+use transcription::openai::{OpenAiTranscriptionConfig, OpenAiTranscriptionProvider};
+use transcription::{TranscriptionOptions, TranscriptionOrchestrator};
 
 #[derive(Debug)]
 struct AppServices {
     _audio_capture_service: AudioCaptureService,
-    _transcription_provider: OpenAiTranscriptionProvider,
+    transcription_orchestrator: TranscriptionOrchestrator,
     _text_insertion_service: TextInsertionService,
     _settings_store: SettingsStore,
     _history_store: HistoryStore,
@@ -37,9 +38,12 @@ struct AppServices {
 
 impl Default for AppServices {
     fn default() -> Self {
+        let provider = OpenAiTranscriptionProvider::new(OpenAiTranscriptionConfig::from_env());
+        let transcription_orchestrator = TranscriptionOrchestrator::new(Arc::new(provider));
+
         Self {
             _audio_capture_service: AudioCaptureService::new(),
-            _transcription_provider: OpenAiTranscriptionProvider::new(),
+            transcription_orchestrator,
             _text_insertion_service: TextInsertionService::new(),
             _settings_store: SettingsStore::new(),
             _history_store: HistoryStore::new(),
@@ -51,7 +55,7 @@ impl Default for AppServices {
 #[derive(Debug, Default)]
 struct AppState {
     status_notifier: Mutex<StatusNotifier>,
-    _services: AppServices,
+    services: AppServices,
 }
 
 #[tauri::command]
@@ -72,15 +76,46 @@ fn set_status(status: AppStatus, state: tauri::State<'_, AppState>) {
 
 #[tauri::command]
 fn insert_text(text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state._services._text_insertion_service.insert_text(&text)
+    state.services._text_insertion_service.insert_text(&text)
 }
 
 #[tauri::command]
 fn copy_to_clipboard(text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state
-        ._services
-        ._text_insertion_service
-        .copy_to_clipboard(&text)
+    state.services._text_insertion_service.copy_to_clipboard(&text)
+}
+
+#[tauri::command]
+async fn transcribe_audio(
+    audio_bytes: Vec<u8>,
+    options: Option<TranscriptionOptions>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    if let Ok(mut notifier) = state.status_notifier.lock() {
+        notifier.set(AppStatus::Transcribing);
+    }
+
+    let result = state
+        .services
+        .transcription_orchestrator
+        .transcribe(audio_bytes, options.unwrap_or_default())
+        .await;
+
+    match result {
+        Ok(transcription) => {
+            if let Ok(mut notifier) = state.status_notifier.lock() {
+                notifier.set(AppStatus::Idle);
+            }
+
+            Ok(transcription.text)
+        }
+        Err(error) => {
+            if let Ok(mut notifier) = state.status_notifier.lock() {
+                notifier.set(AppStatus::Error);
+            }
+
+            Err(error.to_string())
+        }
+    }
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -177,6 +212,7 @@ pub fn run() {
             set_status,
             insert_text,
             copy_to_clipboard,
+            transcribe_audio,
             hotkey_service::get_hotkey_config,
             hotkey_service::get_hotkey_recording_state,
             hotkey_service::set_hotkey_config
