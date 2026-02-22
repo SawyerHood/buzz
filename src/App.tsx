@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   ShieldQuestion,
   RefreshCw,
+  RotateCcw,
   X,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,6 +40,26 @@ type PermissionSnapshot = {
   accessibility: PermissionState;
   allGranted: boolean;
 };
+type DailyUsageStats = {
+  transcriptions: number;
+  words: number;
+  recordingSeconds: number;
+};
+type DailyWordCount = {
+  date: string;
+  words: number;
+};
+type UsageStatsReport = {
+  totalTranscriptions: number;
+  totalWords: number;
+  totalRecordingSeconds: number;
+  wordsPerMinute: number;
+  averageTranscriptionLength: number;
+  streakDays: number;
+  today: DailyUsageStats;
+  dailyWordHistory: DailyWordCount[];
+  lastUpdated: string;
+};
 
 const STATUS_LABEL: Record<AppStatus, string> = {
   idle: "Idle",
@@ -65,11 +86,50 @@ const PERMISSION_HELP: Record<PermissionType, string> = {
 };
 
 const PERMISSION_CARD_DISMISSED_KEY = "voice.permissionsOnboardingDismissed.v1";
+const INTEGER_FORMATTER = new Intl.NumberFormat();
+const DAY_LABEL_FORMATTER = new Intl.DateTimeFormat(undefined, { weekday: "short" });
 
 function toErrorMessage(error: unknown, fallbackMessage: string): string {
   if (typeof error === "string" && error.trim()) return error;
   if (error instanceof Error && error.message.trim()) return error.message;
   return fallbackMessage;
+}
+
+function toIsoDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function buildFallbackDailyWordHistory(days: number): DailyWordCount[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (days - 1 - index));
+    return {
+      date: toIsoDateKey(date),
+      words: 0,
+    };
+  });
+}
+
+function formatInteger(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return INTEGER_FORMATTER.format(Math.max(0, Math.round(value)));
+}
+
+function formatMetric(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0.0";
+  return value.toFixed(1);
+}
+
+function dayLabelFromDateKey(dateKey: string): string {
+  const date = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "--";
+  return DAY_LABEL_FORMATTER.format(date);
 }
 
 function readPermissionCardDismissed(): boolean {
@@ -238,9 +298,13 @@ function PermissionOnboardingCard({
 type DashboardViewProps = {
   audioLevel: number;
   isRefreshingPermissions: boolean;
+  isRefreshingUsageStats: boolean;
+  isResettingUsageStats: boolean;
   lastTranscript: string;
   onDismissPermissions: () => void;
   onRefreshPermissions: () => void;
+  onRefreshUsageStats: () => void;
+  onResetUsageStats: () => void;
   onRequestPermission: (permission: PermissionType) => void;
   permissionErrorMessage: string;
   permissions: PermissionSnapshot | null;
@@ -248,14 +312,20 @@ type DashboardViewProps = {
   showPermissionsCard: boolean;
   status: AppStatus;
   statusDescription: string;
+  usageStats: UsageStatsReport | null;
+  usageStatsErrorMessage: string;
 };
 
 function DashboardView({
   audioLevel,
   isRefreshingPermissions,
+  isRefreshingUsageStats,
+  isResettingUsageStats,
   lastTranscript,
   onDismissPermissions,
   onRefreshPermissions,
+  onRefreshUsageStats,
+  onResetUsageStats,
   onRequestPermission,
   permissionErrorMessage,
   permissions,
@@ -263,6 +333,8 @@ function DashboardView({
   showPermissionsCard,
   status,
   statusDescription,
+  usageStats,
+  usageStatsErrorMessage,
 }: DashboardViewProps) {
   const statusColors: Record<AppStatus, string> = {
     idle: "bg-muted-foreground",
@@ -277,6 +349,18 @@ function DashboardView({
     transcribing: "ring-2 ring-amber-500/20",
     error: "ring-2 ring-destructive/20",
   };
+
+  const dailyWordHistory = usageStats?.dailyWordHistory?.length
+    ? usageStats.dailyWordHistory
+    : buildFallbackDailyWordHistory(30);
+  const chartPoints = dailyWordHistory.slice(-14).map((point) => ({
+    ...point,
+    dayLabel: dayLabelFromDateKey(point.date),
+  }));
+  const maxChartWords = chartPoints.reduce(
+    (highest, point) => Math.max(highest, point.words),
+    0
+  );
 
   return (
     <div className="space-y-3">
@@ -343,6 +427,133 @@ function DashboardView({
           </p>
         </CardContent>
       </Card>
+
+      {/* Usage Stats */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle className="text-sm uppercase tracking-wider">Usage Stats</CardTitle>
+              <CardDescription className="text-xs mt-1">
+                Totals from successful transcriptions and inserts.
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={onRefreshUsageStats}
+                disabled={isRefreshingUsageStats || isResettingUsageStats}
+              >
+                <RefreshCw className={cn("size-3", isRefreshingUsageStats && "animate-spin")} />
+                {isRefreshingUsageStats ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-destructive hover:text-destructive"
+                onClick={onResetUsageStats}
+                disabled={isResettingUsageStats || isRefreshingUsageStats}
+              >
+                <RotateCcw className="size-3" />
+                {isResettingUsageStats ? "Resetting..." : "Reset Stats"}
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {usageStatsErrorMessage && (
+            <Alert variant="destructive" className="py-2">
+              <AlertDescription className="text-xs">{usageStatsErrorMessage}</AlertDescription>
+            </Alert>
+          )}
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Total Transcriptions
+              </p>
+              <p className="mt-1 text-lg font-semibold tabular-nums">
+                {formatInteger(usageStats?.totalTranscriptions ?? 0)}
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Total Words
+              </p>
+              <p className="mt-1 text-lg font-semibold tabular-nums">
+                {formatInteger(usageStats?.totalWords ?? 0)}
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Words / Minute
+              </p>
+              <p className="mt-1 text-base font-semibold tabular-nums">
+                {formatMetric(usageStats?.wordsPerMinute ?? 0)}
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Average Length
+              </p>
+              <p className="mt-1 text-base font-semibold tabular-nums">
+                {formatMetric(usageStats?.averageTranscriptionLength ?? 0)} words
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Today
+              </p>
+              <p className="mt-1 text-sm font-semibold tabular-nums">
+                {formatInteger(usageStats?.today.transcriptions ?? 0)} transcriptions
+              </p>
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {formatInteger(usageStats?.today.words ?? 0)} words
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/60 p-2.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Streak
+              </p>
+              <p className="mt-1 text-sm font-semibold tabular-nums">
+                {formatInteger(usageStats?.streakDays ?? 0)} day streak {"🔥"}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Last 14 Days (Words)
+            </p>
+            <div className="rounded-lg border bg-background/60 px-2.5 py-3">
+              <div className="flex h-24 items-end gap-1.5">
+                {chartPoints.map((point) => {
+                  const ratio = maxChartWords > 0 ? point.words / maxChartWords : 0;
+                  const minHeight = point.words > 0 ? 10 : 4;
+                  const heightPercent = Math.max(Math.round(ratio * 100), minHeight);
+
+                  return (
+                    <div key={point.date} className="flex min-w-0 flex-1 flex-col items-center gap-1">
+                      <div className="flex h-16 w-full items-end justify-center">
+                        <div
+                          className={cn(
+                            "w-full rounded-sm transition-all",
+                            point.words > 0 ? "bg-primary/80" : "bg-muted-foreground/20"
+                          )}
+                          style={{ height: `${heightPercent}%` }}
+                          title={`${formatInteger(point.words)} words on ${point.date}`}
+                        />
+                      </div>
+                      <span className="text-[10px] text-muted-foreground">{point.dayLabel}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -371,6 +582,10 @@ function App() {
   const [permissionErrorMessage, setPermissionErrorMessage] = useState("");
   const [requestingPermission, setRequestingPermission] = useState<PermissionType | null>(null);
   const [isRefreshingPermissions, setIsRefreshingPermissions] = useState(false);
+  const [usageStats, setUsageStats] = useState<UsageStatsReport | null>(null);
+  const [usageStatsErrorMessage, setUsageStatsErrorMessage] = useState("");
+  const [isRefreshingUsageStats, setIsRefreshingUsageStats] = useState(false);
+  const [isResettingUsageStats, setIsResettingUsageStats] = useState(false);
   const [permissionCardDismissed, setPermissionCardDismissedState] = useState<boolean>(
     () => readPermissionCardDismissed()
   );
@@ -412,6 +627,40 @@ function App() {
     }
   }, []);
 
+  const refreshUsageStats = useCallback(async () => {
+    setIsRefreshingUsageStats(true);
+    try {
+      const stats = await invoke<UsageStatsReport>("get_usage_stats");
+      setUsageStats(stats);
+      setUsageStatsErrorMessage("");
+    } catch (error) {
+      setUsageStatsErrorMessage(
+        toErrorMessage(error, "Unable to load usage stats from the backend.")
+      );
+    } finally {
+      setIsRefreshingUsageStats(false);
+    }
+  }, []);
+
+  const resetUsageStats = useCallback(() => {
+    if (isResettingUsageStats) return;
+    if (!window.confirm("Reset all usage stats? This cannot be undone.")) return;
+
+    void (async () => {
+      setIsResettingUsageStats(true);
+      setUsageStatsErrorMessage("");
+
+      try {
+        await invoke("reset_usage_stats");
+        await refreshUsageStats();
+      } catch (error) {
+        setUsageStatsErrorMessage(toErrorMessage(error, "Failed to reset usage stats."));
+      } finally {
+        setIsResettingUsageStats(false);
+      }
+    })();
+  }, [isResettingUsageStats, refreshUsageStats]);
+
   const dismissPermissionCard = useCallback(() => {
     setPermissionCardDismissedState(true);
     setPermissionCardDismissed(true);
@@ -448,6 +697,20 @@ function App() {
       }
 
       try {
+        const initialUsageStats = await invoke<UsageStatsReport>("get_usage_stats");
+        if (isMounted) {
+          setUsageStats(initialUsageStats);
+          setUsageStatsErrorMessage("");
+        }
+      } catch (error) {
+        if (isMounted) {
+          setUsageStatsErrorMessage(
+            toErrorMessage(error, "Unable to load usage stats from the backend.")
+          );
+        }
+      }
+
+      try {
         const listeners = await Promise.all([
           listen<AppStatus>("voice://status-changed", ({ payload }) => {
             statusRef.current = payload;
@@ -466,6 +729,9 @@ function App() {
             setLastTranscript(payload.text ?? "");
             if (activeViewRef.current === "history") {
               setHistoryRefreshSignal((current) => current + 1);
+            }
+            if (activeViewRef.current === "dashboard") {
+              void refreshUsageStats();
             }
           }),
           listen<PipelineErrorEvent>("voice://pipeline-error", ({ payload }) => {
@@ -493,15 +759,23 @@ function App() {
       isMounted = false;
       unlistenFns.forEach((dispose) => dispose());
     };
-  }, []);
+  }, [refreshUsageStats]);
 
   useEffect(() => {
     function handleWindowFocus() {
       void refreshPermissions();
+      if (activeViewRef.current === "dashboard") {
+        void refreshUsageStats();
+      }
     }
     window.addEventListener("focus", handleWindowFocus);
     return () => window.removeEventListener("focus", handleWindowFocus);
-  }, [refreshPermissions]);
+  }, [refreshPermissions, refreshUsageStats]);
+
+  useEffect(() => {
+    if (activeView !== "dashboard") return;
+    void refreshUsageStats();
+  }, [activeView, refreshUsageStats]);
 
   const hasMissingPermissions = useMemo(
     () => !permissions || !permissions.allGranted,
@@ -613,9 +887,13 @@ function App() {
                 <DashboardView
                   audioLevel={audioLevel}
                   isRefreshingPermissions={isRefreshingPermissions}
+                  isRefreshingUsageStats={isRefreshingUsageStats}
+                  isResettingUsageStats={isResettingUsageStats}
                   lastTranscript={lastTranscript}
                   onDismissPermissions={dismissPermissionCard}
                   onRefreshPermissions={() => void refreshPermissions()}
+                  onRefreshUsageStats={() => void refreshUsageStats()}
+                  onResetUsageStats={resetUsageStats}
                   onRequestPermission={requestPermission}
                   permissionErrorMessage={permissionErrorMessage}
                   permissions={permissions}
@@ -623,6 +901,8 @@ function App() {
                   showPermissionsCard={showPermissionsCard}
                   status={status}
                   statusDescription={statusDescription}
+                  usageStats={usageStats}
+                  usageStatsErrorMessage={usageStatsErrorMessage}
                 />
               )}
               {activeView === "history" && (

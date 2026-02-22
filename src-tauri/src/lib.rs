@@ -7,6 +7,7 @@ mod logging;
 mod oauth;
 mod permission_service;
 mod settings_store;
+mod stats_store;
 mod status_notifier;
 mod text_insertion_service;
 mod transcription;
@@ -39,6 +40,7 @@ use settings_store::{
     SettingsStore, VoiceSettings, VoiceSettingsUpdate, RECORDING_MODE_DOUBLE_TAP_TOGGLE,
     RECORDING_MODE_HOLD_TO_TALK, RECORDING_MODE_TOGGLE,
 };
+use stats_store::{StatsStore, UsageStatsReport};
 use status_notifier::{AppStatus, StatusNotifier};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -76,6 +78,18 @@ const OVERLAY_WINDOW_WIDTH: f64 = OVERLAY_PILL_WIDTH + (OVERLAY_SHADOW_SAFE_SIDE
 const OVERLAY_WINDOW_HEIGHT: f64 =
     OVERLAY_PILL_HEIGHT + OVERLAY_SHADOW_SAFE_TOP + OVERLAY_SHADOW_SAFE_BOTTOM;
 const OVERLAY_WINDOW_TOP_MARGIN: f64 = 12.0;
+
+fn count_words(text: &str) -> u64 {
+    text.split_whitespace().count() as u64
+}
+
+fn sanitize_recording_duration_secs(duration_secs: f64) -> f64 {
+    if duration_secs.is_finite() && duration_secs > 0.0 {
+        duration_secs
+    } else {
+        0.0
+    }
+}
 
 fn recording_mode_from_settings_value(value: &str) -> Result<RecordingMode, String> {
     match value.trim().to_lowercase().as_str() {
@@ -384,6 +398,7 @@ struct AppPipelineDelegate {
     app: AppHandle,
     session_id: Option<u64>,
     realtime_session: Arc<Mutex<Option<RealtimeTranscriptionSession>>>,
+    recording_duration_secs: Arc<Mutex<Option<f64>>>,
 }
 
 impl AppPipelineDelegate {
@@ -396,6 +411,7 @@ impl AppPipelineDelegate {
             app,
             session_id: None,
             realtime_session,
+            recording_duration_secs: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -408,6 +424,7 @@ impl AppPipelineDelegate {
             app,
             session_id: Some(session_id),
             realtime_session,
+            recording_duration_secs: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -488,6 +505,53 @@ impl AppPipelineDelegate {
             session.close();
         }
     }
+
+    fn store_recording_duration_secs(&self, duration_secs: Option<f64>) {
+        match self.recording_duration_secs.lock() {
+            Ok(mut guard) => {
+                *guard = duration_secs.map(sanitize_recording_duration_secs);
+            }
+            Err(_) => {
+                warn!(
+                    session_id = ?self.session_id,
+                    "failed to store recording duration because lock was poisoned"
+                );
+            }
+        }
+    }
+
+    fn take_recording_duration_secs(&self) -> Option<f64> {
+        match self.recording_duration_secs.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => {
+                warn!(
+                    session_id = ?self.session_id,
+                    "failed to read recording duration because lock was poisoned"
+                );
+                None
+            }
+        }
+    }
+
+    fn clear_recording_duration_secs(&self) {
+        self.store_recording_duration_secs(None);
+    }
+
+    fn record_usage_stats_for_transcript(&self, transcript: &str) {
+        let word_count = count_words(transcript);
+        let recording_duration_secs = self.take_recording_duration_secs().unwrap_or(0.0);
+        let stats_store = self.app.state::<StatsStore>();
+
+        if let Err(error) = stats_store.record_transcription(word_count, recording_duration_secs) {
+            warn!(
+                session_id = ?self.session_id,
+                word_count,
+                recording_duration_secs,
+                %error,
+                "failed to persist usage stats"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -549,6 +613,7 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         debug!(session_id = ?self.session_id, success, "recording stop acknowledged");
         if !success {
             self.clear_realtime_session();
+            self.clear_recording_duration_secs();
         }
         let hotkey_service = self.app.state::<HotkeyService>();
         hotkey_service.acknowledge_transition(RecordingTransition::Stopped, success);
@@ -565,6 +630,7 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         ensure_microphone_permission_for_recording(&state)?;
 
         self.clear_realtime_session();
+        self.clear_recording_duration_secs();
 
         let auth_method = state
             .services
@@ -665,9 +731,14 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
             .services
             .audio_capture_service
             .stop_recording(self.app.clone())
-            .map(|recorded| recorded.wav_bytes);
+            .map(|recorded| {
+                let duration_secs = recorded.duration_ms as f64 / 1000.0;
+                self.store_recording_duration_secs(Some(duration_secs));
+                recorded.wav_bytes
+            });
         if result.is_err() {
             self.clear_realtime_session();
+            self.clear_recording_duration_secs();
         }
         result
     }
@@ -800,7 +871,7 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         let state = self.app.state::<AppState>();
         let auto_insert = state.services.settings_store.current().auto_insert;
 
-        if auto_insert {
+        let insertion_result = if auto_insert {
             ensure_accessibility_permission_for_insertion(&state)?;
             state
                 .services
@@ -811,7 +882,13 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
                 .services
                 .text_insertion_service
                 .copy_to_clipboard(transcript)
+        };
+
+        if insertion_result.is_ok() {
+            self.record_usage_stats_for_transcript(transcript);
         }
+
+        insertion_result
     }
 
     fn save_history_entry(&self, transcript: &PipelineTranscript) -> Result<(), String> {
@@ -1788,6 +1865,18 @@ fn clear_history(history_store: tauri::State<'_, HistoryStore>) -> Result<(), St
 }
 
 #[tauri::command]
+fn get_usage_stats(stats_store: tauri::State<'_, StatsStore>) -> Result<UsageStatsReport, String> {
+    debug!("usage stats requested");
+    stats_store.get_usage_stats()
+}
+
+#[tauri::command]
+fn reset_usage_stats(stats_store: tauri::State<'_, StatsStore>) -> Result<(), String> {
+    info!("usage stats reset requested");
+    stats_store.reset_usage_stats()
+}
+
+#[tauri::command]
 fn export_logs(log_state: tauri::State<'_, LoggingState>) -> Result<String, String> {
     info!(
         log_file = %log_state.log_file_path().display(),
@@ -1887,6 +1976,10 @@ pub fn run() {
             let history_store = HistoryStore::new(app.handle()).map_err(std::io::Error::other)?;
             app.manage(history_store);
             info!("history store initialized");
+
+            let stats_store = StatsStore::new(app.handle()).map_err(std::io::Error::other)?;
+            app.manage(stats_store);
+            info!("usage stats store initialized");
 
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
@@ -2003,6 +2096,8 @@ pub fn run() {
             get_history_entry,
             delete_history_entry,
             clear_history,
+            get_usage_stats,
+            reset_usage_stats,
             export_logs,
             hotkey_service::get_hotkey_config,
             hotkey_service::get_hotkey_recording_state,
@@ -2039,8 +2134,8 @@ mod tests {
     use super::{
         active_pipeline_session_id, apply_hotkey_from_settings_with_fallback,
         apply_settings_transaction_with_hooks, cancel_recording_with_hooks,
-        handle_audio_input_stream_error_with_hooks,
-        has_api_key, load_startup_settings_with_fallback, overlay_position_from_work_area,
+        handle_audio_input_stream_error_with_hooks, has_api_key,
+        load_startup_settings_with_fallback, overlay_position_from_work_area,
         permission_preflight_error_message, should_show_overlay_for_status,
         spawn_pipeline_stage_error_reset, AppState, PipelineRuntimeState,
         OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
