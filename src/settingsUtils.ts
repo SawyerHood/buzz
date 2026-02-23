@@ -38,6 +38,26 @@ export function normalizeShortcut(shortcut: string): string {
   return trimmed.length > 0 ? trimmed : DEFAULT_HOTKEY_SHORTCUT;
 }
 
+export function keyDisplayLabel(key: string): string {
+  const trimmed = key.trim();
+  const normalized = trimmed.toLowerCase();
+
+  if (normalized === "meta" || normalized === "cmd" || normalized === "command") return "Cmd";
+  if (normalized === "control" || normalized === "ctrl") return "Ctrl";
+  if (normalized === "option" || normalized === "alt") return "Option";
+  if (normalized === "spacebar") return "Space";
+  if (trimmed.length === 1) return trimmed.toUpperCase();
+  return trimmed;
+}
+
+export function formatShortcutForDisplay(shortcut: string): string {
+  return shortcut
+    .split("+")
+    .map((part) => keyDisplayLabel(part))
+    .filter((part) => part.length > 0)
+    .join(" + ");
+}
+
 export function normalizeOptionalText(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;

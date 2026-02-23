@@ -9,6 +9,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_HOTKEY_SHORTCUT,
+  formatShortcutForDisplay,
+  keyDisplayLabel,
   normalizeRecordingMode,
   OPENAI_PROVIDER,
   shortcutFromKeyboardEvent,
@@ -60,7 +62,7 @@ const STEP_TITLES = [
 ] as const;
 
 const HOTKEY_PRESETS = [
-  { label: "Alt + Space", value: "Alt+Space" },
+  { label: "Option + Space", value: "Alt+Space" },
   { label: "Ctrl + Space", value: "Ctrl+Space" },
   { label: "Shift + Space", value: "Shift+Space" },
   { label: "Cmd + Space", value: "Cmd+Space" },
@@ -72,15 +74,6 @@ function toErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === "string" && error.trim().length > 0) return error;
   if (error instanceof Error && error.message.trim().length > 0) return error.message;
   return fallback;
-}
-
-function keyDisplayLabel(key: string): string {
-  const normalized = key.trim().toLowerCase();
-  if (normalized === "meta" || normalized === "cmd" || normalized === "command") return "Cmd";
-  if (normalized === "control" || normalized === "ctrl") return "Ctrl";
-  if (normalized === "option") return "Alt";
-  if (normalized === "spacebar") return "Space";
-  return key.trim();
 }
 
 function splitShortcut(shortcut: string): string[] {
@@ -113,22 +106,22 @@ function ShortcutKeycaps({
   }
 
   return (
-    <div className="flex flex-wrap items-center justify-center gap-1.5">
+    <div className="flex flex-wrap items-center justify-center gap-1">
       {parts.map((part, index) => (
-        <span key={`${part}-${index}`} className="flex items-center gap-1.5">
+        <span key={`${part}-${index}`} className="flex items-center gap-1">
           <kbd
             className={cn(
               "inline-flex items-center justify-center rounded-lg border font-mono font-semibold",
               "border-border bg-background text-foreground shadow-sm",
               large
-                ? "min-w-[52px] px-3.5 py-2 text-sm tracking-wide"
-                : "min-w-[30px] px-2 py-0.5 text-xs",
+                ? "min-w-[40px] px-2.5 py-1 text-xs tracking-wide"
+                : "min-w-[26px] px-1.5 py-0.5 text-[11px]",
             )}
           >
             {keyDisplayLabel(part)}
           </kbd>
           {index < parts.length - 1 && (
-            <span className={cn("font-medium text-muted-foreground/50", large ? "text-sm" : "text-[10px]")}>
+            <span className={cn("font-medium text-muted-foreground/50", large ? "text-xs" : "text-[10px]")}>
               +
             </span>
           )}
@@ -178,22 +171,22 @@ function SelectableCard({
 
 function ProgressDots({ currentStep }: { currentStep: number }) {
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-center gap-1.5">
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-center gap-1">
         {STEP_TITLES.map((title, index) => (
-          <div key={title} className="flex items-center gap-1.5">
+          <div key={title} className="flex items-center gap-1">
             <div
               className={cn(
-                "size-2 rounded-full transition-all duration-300",
+                "size-1.5 rounded-full transition-all duration-300",
                 index < currentStep && "bg-primary/70",
-                index === currentStep && "bg-primary ring-[2px] ring-primary/20",
+                index === currentStep && "bg-primary ring-[1.5px] ring-primary/20",
                 index > currentStep && "bg-muted",
               )}
             />
             {index < STEP_TITLES.length - 1 && (
               <div
                 className={cn(
-                  "h-px w-5 transition-all duration-300",
+                  "h-px w-3.5 transition-all duration-300",
                   index < currentStep ? "bg-primary/40" : "bg-border",
                 )}
               />
@@ -201,7 +194,7 @@ function ProgressDots({ currentStep }: { currentStep: number }) {
           </div>
         ))}
       </div>
-      <p className="text-center text-[11px] font-medium text-muted-foreground/70">
+      <p className="text-center text-[10px] font-medium text-muted-foreground/70">
         Step {currentStep + 1} of {TOTAL_STEPS} &middot; {STEP_TITLES[currentStep]}
       </p>
     </div>
@@ -220,7 +213,7 @@ function PermissionStatusRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-sm transition-colors",
+        "flex items-center gap-2 rounded-md border px-3 py-2 text-xs transition-colors",
         granted
           ? "border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/40 dark:bg-emerald-950/20"
           : "border-border bg-muted/20",
@@ -275,12 +268,12 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     return matchingPreset?.value ?? CUSTOM_SHORTCUT_PRESET_VALUE;
   }, [hotkeyShortcut]);
   const shortcutInstructionLabel = useMemo(() => {
-    const formatted = splitShortcut(hotkeyShortcut).map(keyDisplayLabel).join(" + ");
+    const formatted = formatShortcutForDisplay(hotkeyShortcut);
     if (formatted.length > 0) {
       return formatted;
     }
 
-    return splitShortcut(DEFAULT_HOTKEY_SHORTCUT).map(keyDisplayLabel).join(" + ");
+    return formatShortcutForDisplay(DEFAULT_HOTKEY_SHORTCUT);
   }, [hotkeyShortcut]);
 
   const authSuccessMessage = useMemo(() => {
@@ -594,17 +587,17 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     /* ── Welcome ── */
     if (step === 0) {
       return (
-        <div className="flex flex-col items-center gap-6 py-4 text-center">
-          <div className="flex size-16 items-center justify-center rounded-2xl border bg-muted/30">
-            <img src="/icon.png" alt="Buzz app icon" className="size-10 rounded-lg" />
+        <div className="flex flex-col items-center gap-4 py-1 text-center">
+          <div className="flex size-12 items-center justify-center rounded-xl border bg-muted/30">
+            <img src="/icon.png" alt="Buzz app icon" className="size-8 rounded-md" />
           </div>
-          <div className="space-y-2">
-            <h2 className="text-2xl font-semibold tracking-tight">Welcome to Buzz</h2>
-            <p className="mx-auto max-w-sm text-sm leading-relaxed text-muted-foreground">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">Welcome to Buzz</h2>
+            <p className="mx-auto max-w-sm text-xs leading-relaxed text-muted-foreground">
               Voice-to-text, anywhere on your Mac. Let&apos;s get you set up in about a minute.
             </p>
           </div>
-          <Button onClick={() => setStep(1)}>Get Started</Button>
+          <Button size="sm" onClick={() => setStep(1)}>Get Started</Button>
         </div>
       );
     }
@@ -612,10 +605,10 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     /* ── Microphone ── */
     if (step === 1) {
       return (
-        <div className="space-y-5">
-          <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight">Microphone access</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Microphone access</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Buzz needs your microphone to capture speech and turn it into text.
             </p>
           </div>
@@ -625,8 +618,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             label={micGranted ? "Microphone permission granted" : "Waiting for microphone access"}
           />
 
-          <div className="flex justify-start pt-1">
+          <div className="flex justify-start">
             <Button
+              size="sm"
               variant="outline"
               onClick={handleRequestMic}
               disabled={isRequestingMic || Boolean(micGranted)}
@@ -649,12 +643,12 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               )}
             </Button>
           </div>
-          <div className="flex items-center justify-between pt-1">
-            <Button variant="ghost" onClick={handleBack}>
+          <div className="flex items-center justify-between">
+            <Button size="sm" variant="ghost" onClick={handleBack}>
               <ChevronLeft className="size-4" />
               Back
             </Button>
-            <Button onClick={() => setStep(2)} disabled={!micGranted}>
+            <Button size="sm" onClick={() => setStep(2)} disabled={!micGranted}>
               Continue
             </Button>
           </div>
@@ -665,10 +659,10 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     /* ── Accessibility ── */
     if (step === 2) {
       return (
-        <div className="space-y-5">
-          <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight">Accessibility access</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Accessibility access</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Buzz uses Accessibility to paste transcribed text at your cursor in any app.
             </p>
           </div>
@@ -682,14 +676,15 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             }
           />
 
-          <p className="rounded-lg border bg-muted/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <p className="rounded-md border bg-muted/20 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
             macOS requires you to manually enable Buzz in{" "}
             <span className="font-medium">System Settings → Privacy & Security → Accessibility</span>{" "}
             after opening the panel.
           </p>
 
-          <div className="flex justify-start pt-1">
+          <div className="flex justify-start">
             <Button
+              size="sm"
               variant="outline"
               onClick={handleOpenAccessibilitySettings}
               disabled={isOpeningAccessibilitySettings || Boolean(accessibilityGranted)}
@@ -712,12 +707,12 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               )}
             </Button>
           </div>
-          <div className="flex items-center justify-between pt-1">
-            <Button variant="ghost" onClick={handleBack}>
+          <div className="flex items-center justify-between">
+            <Button size="sm" variant="ghost" onClick={handleBack}>
               <ChevronLeft className="size-4" />
               Back
             </Button>
-            <Button onClick={() => setStep(3)} disabled={!accessibilityGranted}>
+            <Button size="sm" onClick={() => setStep(3)} disabled={!accessibilityGranted}>
               Continue
             </Button>
           </div>
@@ -728,15 +723,15 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     /* ── Authentication ── */
     if (step === 3) {
       return (
-        <div className="space-y-5">
-          <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight">Connect to OpenAI</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Connect to OpenAI</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Choose how Buzz authenticates with OpenAI for transcription.
             </p>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-2">
             <SelectableCard
               selected={selectedAuthMethod === "oauth"}
               onClick={() => {
@@ -744,9 +739,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 setErrorMessage("");
               }}
             >
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Sign in with ChatGPT</CardTitle>
-                <CardDescription className="text-xs">
+              <CardHeader className="space-y-1 p-3 pb-2">
+                <CardTitle className="text-xs">Sign in with ChatGPT</CardTitle>
+                <CardDescription className="text-[11px]">
                   Opens your browser for a quick OAuth login.
                 </CardDescription>
               </CardHeader>
@@ -759,9 +754,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 setErrorMessage("");
               }}
             >
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Use API Key</CardTitle>
-                <CardDescription className="text-xs">
+              <CardHeader className="space-y-1 p-3 pb-2">
+                <CardTitle className="text-xs">Use API Key</CardTitle>
+                <CardDescription className="text-[11px]">
                   Paste an OpenAI API key if you prefer key-based auth.
                 </CardDescription>
               </CardHeader>
@@ -769,7 +764,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           </div>
 
           {selectedAuthMethod === "oauth" && (
-            <div className="space-y-2.5 rounded-lg border bg-muted/20 p-3.5">
+            <div className="space-y-2 rounded-md border bg-muted/20 p-2.5">
               <Button
                 size="sm"
                 className="w-full"
@@ -789,7 +784,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           )}
 
           {shouldShowOnboardingApiKeyInput(selectedAuthMethod) && (
-            <div className="space-y-2.5 rounded-lg border bg-muted/20 p-3.5">
+            <div className="space-y-2 rounded-md border bg-muted/20 p-2.5">
               <Input
                 value={apiKeyDraft}
                 onChange={(event) => setApiKeyDraft(event.currentTarget.value)}
@@ -816,18 +811,18 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           )}
 
           {authSuccessMessage && (
-            <div className="flex items-center gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 text-sm text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/20 dark:text-emerald-300">
+            <div className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/20 dark:text-emerald-300">
               <CheckCircle2 className="size-4 shrink-0" />
               <span>{authSuccessMessage}</span>
             </div>
           )}
 
-          <div className="flex items-center justify-between pt-1">
-            <Button variant="ghost" onClick={handleBack}>
+          <div className="flex items-center justify-between">
+            <Button size="sm" variant="ghost" onClick={handleBack}>
               <ChevronLeft className="size-4" />
               Back
             </Button>
-            <Button onClick={() => setStep(4)} disabled={!authConfigured}>
+            <Button size="sm" onClick={() => setStep(4)} disabled={!authConfigured}>
               Continue
             </Button>
           </div>
@@ -838,27 +833,27 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
     /* ── Shortcut + Mode ── */
     if (step === 4) {
       return (
-        <div className="space-y-6">
-          <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight">Recording controls</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Recording controls</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Pick your recording mode and shortcut. You can change these anytime in Settings.
             </p>
           </div>
 
           {/* Mode selection */}
-          <div className="space-y-2.5">
-            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
               Recording Mode
             </p>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-2">
               <SelectableCard
                 selected={recordingMode === "toggle"}
                 onClick={() => setRecordingMode("toggle")}
               >
-                <CardHeader className="p-4">
-                  <CardTitle className="text-sm">Toggle</CardTitle>
-                  <CardDescription className="text-xs">
+                <CardHeader className="space-y-1 p-3">
+                  <CardTitle className="text-xs">Toggle</CardTitle>
+                  <CardDescription className="text-[11px]">
                     Press once to start, press again to stop.
                   </CardDescription>
                 </CardHeader>
@@ -868,9 +863,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 selected={recordingMode === "hold_to_talk"}
                 onClick={() => setRecordingMode("hold_to_talk")}
               >
-                <CardHeader className="p-4">
-                  <CardTitle className="text-sm">Hold to Talk</CardTitle>
-                  <CardDescription className="text-xs">
+                <CardHeader className="space-y-1 p-3">
+                  <CardTitle className="text-xs">Hold to Talk</CardTitle>
+                  <CardDescription className="text-[11px]">
                     Hold while speaking, release to stop.
                   </CardDescription>
                 </CardHeader>
@@ -879,12 +874,12 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           </div>
 
           {/* Shortcut selection */}
-          <div className="space-y-2.5">
-            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
               Recording Shortcut
             </p>
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-1.5 sm:grid-cols-2">
               {HOTKEY_PRESETS.map((preset) => {
                 const isActive = selectedShortcutPreset === preset.value;
                 return (
@@ -892,7 +887,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                     key={preset.value}
                     type="button"
                     variant={isActive ? "default" : "outline"}
-                    className="justify-center font-medium"
+                    className="h-8 justify-center rounded-full px-3 text-xs font-medium"
                     onClick={() => {
                       setIsRecordingShortcut(false);
                       setHotkeyShortcut(preset.value);
@@ -911,34 +906,35 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                   ? "default"
                   : "outline"
               }
-              className="w-full"
+              className="h-8 w-full rounded-full text-xs"
               onClick={() => setIsRecordingShortcut((active) => !active)}
             >
               {isRecordingShortcut ? "Press your key combination…" : "Record Custom Shortcut"}
             </Button>
 
             {isRecordingShortcut && (
-              <p className="text-center text-xs font-medium text-primary">
+              <p className="text-center text-[11px] font-medium text-primary">
                 Listening for key combination…
               </p>
             )}
           </div>
 
           {/* Current shortcut preview */}
-          <div className="space-y-3 rounded-xl border bg-muted/20 p-5 text-center">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground/80">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-3 py-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
               Your shortcut
             </p>
-            <ShortcutKeycaps shortcut={hotkeyShortcut} large />
-            <p className="text-xs text-muted-foreground">{stopInstruction(recordingMode)}</p>
+            <ShortcutKeycaps shortcut={hotkeyShortcut} />
+            <p className="text-[11px] text-muted-foreground">{stopInstruction(recordingMode)}</p>
           </div>
 
           <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={handleBack}>
+            <Button size="sm" variant="ghost" onClick={handleBack}>
               <ChevronLeft className="size-4" />
               Back
             </Button>
             <Button
+              size="sm"
               onClick={handleSaveShortcutAndMode}
               disabled={isSavingShortcutSettings}
             >
@@ -965,10 +961,10 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
       const hasTranscript = practiceTranscript.length > 0;
 
       return (
-        <div className="space-y-5">
-          <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight">Try it out</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Try it out</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
               Give it a spin - trigger your shortcut, say something, and watch the magic.
             </p>
           </div>
@@ -976,26 +972,26 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           {/* Prominent instruction box */}
           <div
             className={cn(
-              "space-y-3 rounded-xl border p-5 text-center transition-all duration-300",
+              "space-y-2 rounded-lg border p-3 text-center transition-all duration-300",
               isListening
                 ? "border-primary/60 bg-primary/5"
                 : "border-border bg-muted/20",
             )}
           >
-            <p className="text-sm font-semibold text-foreground">
+            <p className="text-xs font-semibold text-foreground">
               Press {shortcutInstructionLabel} to start recording
             </p>
-            <ShortcutKeycaps shortcut={hotkeyShortcut} large />
-            <p className="text-xs text-muted-foreground">
+            <ShortcutKeycaps shortcut={hotkeyShortcut} />
+            <p className="text-[11px] text-muted-foreground">
               {modeLabel} mode &middot; {stopInstruction(recordingMode)}
             </p>
           </div>
 
           {/* Status pipeline indicators */}
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-1.5 sm:grid-cols-3">
             <div
               className={cn(
-                "flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium transition-all duration-200",
+                "flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-all duration-200",
                 isListening
                   ? "border-emerald-400/60 bg-emerald-50 text-emerald-700 dark:border-emerald-600/40 dark:bg-emerald-950/25 dark:text-emerald-300"
                   : "border-border bg-muted/20 text-muted-foreground",
@@ -1006,7 +1002,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </div>
             <div
               className={cn(
-                "flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium transition-all duration-200",
+                "flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-all duration-200",
                 isTranscribing
                   ? "border-primary/40 bg-primary/10 text-foreground"
                   : "border-border bg-muted/20 text-muted-foreground",
@@ -1017,7 +1013,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </div>
             <div
               className={cn(
-                "flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium transition-all duration-200",
+                "flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-all duration-200",
                 hasTranscript && !isListening && !isTranscribing
                   ? "border-emerald-400/60 bg-emerald-50 text-emerald-700 dark:border-emerald-600/40 dark:bg-emerald-950/25 dark:text-emerald-300"
                   : "border-border bg-muted/20 text-muted-foreground",
@@ -1031,14 +1027,14 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           </div>
 
           {/* Transcript area */}
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
                 Transcript
               </p>
               <span
                 className={cn(
-                  "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+                  "rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
                   practiceStatus === "listening" && "border-emerald-300 bg-emerald-50 text-emerald-600 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400",
                   practiceStatus === "transcribing" && "border-primary/40 bg-primary/10 text-foreground",
                   practiceStatus === "error" && "border-red-300 bg-red-50 text-red-600 dark:border-red-700 dark:bg-red-950/30 dark:text-red-400",
@@ -1052,23 +1048,23 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               value={practiceTranscript}
               readOnly
               placeholder="Your transcript will appear here…"
-              className="min-h-[100px] w-full resize-none rounded-lg border bg-muted/15 px-3.5 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground/40 outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+              className="min-h-[72px] w-full resize-none rounded-md border bg-muted/15 px-3 py-2 text-xs leading-relaxed placeholder:text-muted-foreground/40 outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
             />
-            <p className="text-xs leading-relaxed text-muted-foreground">{practiceStatusDescription}</p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{practiceStatusDescription}</p>
           </div>
 
           {practiceErrorMessage && (
-            <Alert variant="destructive" className="py-2">
+            <Alert variant="destructive" className="py-1.5">
               <AlertDescription className="text-xs">{practiceErrorMessage}</AlertDescription>
             </Alert>
           )}
 
-          <div className="flex items-center justify-between pt-1">
-            <Button variant="ghost" onClick={handleBack}>
+          <div className="flex items-center justify-between">
+            <Button size="sm" variant="ghost" onClick={handleBack}>
               <ChevronLeft className="size-4" />
               Back
             </Button>
-            <Button onClick={handleContinueFromPracticeStep}>
+            <Button size="sm" onClick={handleContinueFromPracticeStep}>
               Continue
             </Button>
           </div>
@@ -1078,41 +1074,41 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
     /* ── All Done ── */
     return (
-      <div className="flex flex-col items-center gap-6 py-2 text-center">
-        <div className="flex size-16 items-center justify-center rounded-2xl border bg-muted/30">
-          <span className="text-3xl" role="img" aria-label="party">
+      <div className="flex flex-col items-center gap-4 py-1 text-center">
+        <div className="flex size-12 items-center justify-center rounded-xl border bg-muted/30">
+          <span className="text-2xl" role="img" aria-label="party">
             🎉
           </span>
         </div>
 
-        <div className="space-y-2">
-          <h2 className="text-2xl font-semibold tracking-tight">You&apos;re all set!</h2>
-          <p className="mx-auto max-w-xs text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">You&apos;re all set!</h2>
+          <p className="mx-auto max-w-xs text-xs leading-relaxed text-muted-foreground">
             Buzz is ready to go. Here&apos;s your recording shortcut for quick reference.
           </p>
         </div>
 
-        <div className="w-full max-w-sm space-y-4 rounded-xl border bg-muted/20 p-5">
-          <div className="space-y-2.5">
-            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/80">
+        <div className="w-full max-w-sm space-y-2 rounded-lg border bg-muted/20 p-3">
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
               Your shortcut
             </p>
-            <ShortcutKeycaps shortcut={hotkeyShortcut} large />
+            <ShortcutKeycaps shortcut={hotkeyShortcut} />
           </div>
 
           <div className="flex items-center justify-center">
-            <span className="rounded-full border bg-background/70 px-3 py-1 text-xs font-medium text-foreground/90">
+            <span className="rounded-full border bg-background/70 px-2.5 py-0.5 text-[11px] font-medium text-foreground/90">
               {modeLabel} &middot; {stopInstruction(recordingMode)}
             </span>
           </div>
         </div>
 
         <div className="flex w-full max-w-sm items-center justify-between">
-          <Button variant="ghost" onClick={handleBack}>
+          <Button size="sm" variant="ghost" onClick={handleBack}>
             <ChevronLeft className="size-4" />
             Back
           </Button>
-          <Button onClick={handleCompleteOnboarding} disabled={isCompleting} size="lg">
+          <Button onClick={handleCompleteOnboarding} disabled={isCompleting} size="sm">
             {isCompleting ? (
               <>
                 <Loader2 className="size-4 animate-spin" />
@@ -1133,20 +1129,20 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   /* ─── Shell layout ───────────────────────────────── */
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-6 py-8">
+    <main className="flex min-h-screen items-center justify-center bg-background px-4 py-4">
       <Card className="w-full max-w-2xl border-border/60 bg-card">
-        <CardHeader className="space-y-4 pb-0">
-          <div className="flex items-center justify-center text-[11px] font-medium text-muted-foreground/60">
+        <CardHeader className="space-y-2 px-4 pt-4 pb-1">
+          <div className="flex items-center justify-center text-[10px] font-medium text-muted-foreground/60">
             First-run setup
           </div>
 
           <ProgressDots currentStep={step} />
         </CardHeader>
 
-        <CardContent className="px-8 py-6">
+        <CardContent className="px-4 py-3">
           {isLoadingInitialState ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-16 text-sm text-muted-foreground">
-              <Loader2 className="size-5 animate-spin text-primary" />
+            <div className="flex flex-col items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
+              <Loader2 className="size-4 animate-spin text-primary" />
               <span>Preparing setup…</span>
             </div>
           ) : (
@@ -1156,7 +1152,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           )}
 
           {errorMessage && (
-            <Alert variant="destructive" className="mt-5 py-2.5">
+            <Alert variant="destructive" className="mt-3 py-2">
               <AlertDescription className="text-xs">{errorMessage}</AlertDescription>
             </Alert>
           )}

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_HOTKEY_SHORTCUT,
   createSettingsUpdatePayload,
+  formatShortcutForDisplay,
+  keyDisplayLabel,
   maskApiKey,
   normalizeOptionalText,
   normalizeRecordingMode,
@@ -26,6 +28,17 @@ function keyboardEvent(input: Partial<KeyboardEvent>): KeyboardEvent {
 describe("settingsUtils", () => {
   it("uses default shortcut when the input is blank", () => {
     expect(normalizeShortcut("   ")).toBe(DEFAULT_HOTKEY_SHORTCUT);
+  });
+
+  it("formats modifier labels for Mac display", () => {
+    expect(keyDisplayLabel("Alt")).toBe("Option");
+    expect(keyDisplayLabel("Ctrl")).toBe("Ctrl");
+    expect(keyDisplayLabel("command")).toBe("Cmd");
+  });
+
+  it("formats whole shortcuts for UI display", () => {
+    expect(formatShortcutForDisplay("Alt+Space")).toBe("Option + Space");
+    expect(formatShortcutForDisplay("Cmd+Shift+v")).toBe("Cmd + Shift + V");
   });
 
   it("normalizes optional text values", () => {
