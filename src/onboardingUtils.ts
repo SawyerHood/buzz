@@ -1,4 +1,6 @@
 export type OnboardingPracticeStatus = "idle" | "listening" | "transcribing" | "error";
+export type OnboardingAuthMethod = "oauth" | "api_key";
+export type OnboardingAuthStatus = { accountId: string } | null;
 
 function normalizeTranscriptText(value: unknown): string {
   if (typeof value !== "string") {
@@ -37,4 +39,32 @@ export function practiceStatusLabel(status: OnboardingPracticeStatus): string {
     default:
       return "Ready";
   }
+}
+
+export function shouldShowOnboardingApiKeyInput(selectedAuthMethod: OnboardingAuthMethod): boolean {
+  return selectedAuthMethod === "api_key";
+}
+
+export function onboardingAuthSuccessMessage({
+  chatgptAuthStatus,
+  hasApiKey,
+  authActionCompleted,
+}: {
+  chatgptAuthStatus: OnboardingAuthStatus;
+  hasApiKey: boolean;
+  authActionCompleted: boolean;
+}): string {
+  if (!authActionCompleted) {
+    return "";
+  }
+
+  if (chatgptAuthStatus) {
+    return `ChatGPT connected (${chatgptAuthStatus.accountId}).`;
+  }
+
+  if (hasApiKey) {
+    return "OpenAI API key saved.";
+  }
+
+  return "";
 }

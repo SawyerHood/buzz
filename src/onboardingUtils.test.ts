@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { extractTranscriptText, practiceStatusLabel } from "./onboardingUtils";
+import {
+  extractTranscriptText,
+  onboardingAuthSuccessMessage,
+  practiceStatusLabel,
+  shouldShowOnboardingApiKeyInput,
+} from "./onboardingUtils";
 
 describe("onboardingUtils", () => {
   it("extracts transcript text from known payload shapes", () => {
@@ -22,5 +27,36 @@ describe("onboardingUtils", () => {
     expect(practiceStatusLabel("listening")).toBe("Recording");
     expect(practiceStatusLabel("transcribing")).toBe("Transcribing");
     expect(practiceStatusLabel("error")).toBe("Error");
+  });
+
+  it("always shows the API key input when API key auth is selected", () => {
+    expect(shouldShowOnboardingApiKeyInput("api_key")).toBe(true);
+    expect(shouldShowOnboardingApiKeyInput("oauth")).toBe(false);
+  });
+
+  it("only returns auth success messaging after an explicit auth action", () => {
+    expect(
+      onboardingAuthSuccessMessage({
+        chatgptAuthStatus: null,
+        hasApiKey: true,
+        authActionCompleted: false,
+      }),
+    ).toBe("");
+
+    expect(
+      onboardingAuthSuccessMessage({
+        chatgptAuthStatus: null,
+        hasApiKey: true,
+        authActionCompleted: true,
+      }),
+    ).toBe("OpenAI API key saved.");
+
+    expect(
+      onboardingAuthSuccessMessage({
+        chatgptAuthStatus: { accountId: "acct_123" },
+        hasApiKey: false,
+        authActionCompleted: true,
+      }),
+    ).toBe("ChatGPT connected (acct_123).");
   });
 });

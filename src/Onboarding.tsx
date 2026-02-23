@@ -15,8 +15,11 @@ import {
   type RecordingMode,
 } from "./settingsUtils";
 import {
+  onboardingAuthSuccessMessage,
   extractTranscriptText,
   practiceStatusLabel,
+  shouldShowOnboardingApiKeyInput,
+  type OnboardingAuthMethod,
   type OnboardingPracticeStatus,
 } from "./onboardingUtils";
 
@@ -38,7 +41,6 @@ type VoiceSettingsUpdate = {
   hotkey_shortcut?: string;
   recording_mode?: RecordingMode;
 };
-type AuthMethod = "oauth" | "api_key";
 type TranscriptReadyEvent = { text?: string };
 type PipelineErrorEvent = { stage: string; message: string };
 
@@ -243,7 +245,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [chatgptAuthStatus, setChatgptAuthStatus] = useState<ChatGptAuthStatus | null>(null);
-  const [selectedAuthMethod, setSelectedAuthMethod] = useState<AuthMethod>("oauth");
+  const [selectedAuthMethod, setSelectedAuthMethod] = useState<OnboardingAuthMethod>("oauth");
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [hotkeyShortcut, setHotkeyShortcut] = useState(DEFAULT_HOTKEY_SHORTCUT);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>("toggle");
@@ -282,17 +284,15 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   }, [hotkeyShortcut]);
 
   const authSuccessMessage = useMemo(() => {
-    if (chatgptAuthStatus) {
-      return `ChatGPT connected (${chatgptAuthStatus.accountId}).`;
-    }
-    if (hasApiKey) {
-      return "OpenAI API key saved.";
-    }
-    return "";
-  }, [chatgptAuthStatus, hasApiKey]);
+    return onboardingAuthSuccessMessage({
+      chatgptAuthStatus,
+      hasApiKey,
+      authActionCompleted,
+    });
+  }, [authActionCompleted, chatgptAuthStatus, hasApiKey]);
   const practiceStatusDescription = useMemo(() => {
     if (practiceStatus === "listening") {
-      return "Recording in progress — speak into your mic.";
+      return "Recording in progress - speak into your mic.";
     }
     if (practiceStatus === "transcribing") {
       return "Transcribing your speech...";
@@ -759,7 +759,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                     Opening browser…
                   </span>
                 ) : (
-                  "Recommended — no API key needed"
+                  "Recommended - no API key needed"
                 )}
               </CardContent>
             </SelectableCard>
@@ -783,7 +783,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </SelectableCard>
           </div>
 
-          {selectedAuthMethod === "api_key" && !hasApiKey && (
+          {shouldShowOnboardingApiKeyInput(selectedAuthMethod) && (
             <div className="space-y-2.5 rounded-lg border bg-muted/20 p-3.5">
               <Input
                 value={apiKeyDraft}
@@ -810,7 +810,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </div>
           )}
 
-          {authConfigured && (
+          {authSuccessMessage && (
             <div className="flex items-center gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 text-sm text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/20 dark:text-emerald-300">
               <CheckCircle2 className="size-4 shrink-0" />
               <span>{authSuccessMessage}</span>
@@ -964,7 +964,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           <div className="space-y-1.5">
             <h2 className="text-xl font-semibold tracking-tight">Try it out</h2>
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Give it a spin — trigger your shortcut, say something, and watch the magic.
+              Give it a spin - trigger your shortcut, say something, and watch the magic.
             </p>
           </div>
 
