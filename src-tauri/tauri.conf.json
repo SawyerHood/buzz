@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "voice",
+  "productName": "Buzz",
   "version": "0.1.0",
-  "identifier": "com.sawyerhood.voice",
+  "identifier": "com.sawyerhood.buzz",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Voice",
+        "title": "Buzz",
         "width": 900,
         "height": 620,
         "minWidth": 600,
@@ -31,8 +31,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": ["app", "dmg"],
     "macOS": {
+      "signingIdentity": "Developer ID Application: Sawyer Hood (9QCU24SXK5)",
       "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
     },

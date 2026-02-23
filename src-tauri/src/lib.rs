@@ -14,7 +14,8 @@ mod transcription;
 mod voice_pipeline;
 
 use std::{
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -78,6 +79,7 @@ const OVERLAY_WINDOW_WIDTH: f64 = OVERLAY_PILL_WIDTH + (OVERLAY_SHADOW_SAFE_SIDE
 const OVERLAY_WINDOW_HEIGHT: f64 =
     OVERLAY_PILL_HEIGHT + OVERLAY_SHADOW_SAFE_TOP + OVERLAY_SHADOW_SAFE_BOTTOM;
 const OVERLAY_WINDOW_TOP_MARGIN: f64 = 12.0;
+const LEGACY_APP_IDENTIFIER: &str = "com.sawyerhood.voice";
 
 fn count_words(text: &str) -> u64 {
     text.split_whitespace().count() as u64
@@ -252,6 +254,62 @@ where
             warn!(%error, "failed to load persisted settings");
             VoiceSettings::default()
         }
+    }
+}
+
+fn copy_directory_contents(source_dir: &Path, destination_dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination_dir)?;
+
+    for entry in fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination_dir.join(entry.file_name());
+        let entry_type = entry.file_type()?;
+
+        if entry_type.is_dir() {
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if entry_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn migrate_legacy_app_data_dir(new_app_data_dir: &Path) {
+    let Some(parent_dir) = new_app_data_dir.parent() else {
+        warn!(
+            path = %new_app_data_dir.display(),
+            "app data directory is missing parent path; skipping legacy migration"
+        );
+        return;
+    };
+
+    let legacy_app_data_dir = parent_dir.join(LEGACY_APP_IDENTIFIER);
+    if !legacy_app_data_dir.is_dir() {
+        return;
+    }
+
+    if new_app_data_dir.exists() {
+        info!(
+            path = %new_app_data_dir.display(),
+            "new app data directory already exists; skipping legacy migration"
+        );
+        return;
+    }
+
+    match copy_directory_contents(&legacy_app_data_dir, new_app_data_dir) {
+        Ok(()) => info!(
+            from = %legacy_app_data_dir.display(),
+            to = %new_app_data_dir.display(),
+            "copied legacy app data directory contents"
+        ),
+        Err(error) => warn!(
+            %error,
+            from = %legacy_app_data_dir.display(),
+            to = %new_app_data_dir.display(),
+            "failed to migrate legacy app data directory contents"
+        ),
     }
 }
 
@@ -2025,6 +2083,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(std::io::Error::other)?;
+            migrate_legacy_app_data_dir(&app_data_dir);
             app.manage(AppState::new(app_data_dir.clone()));
             info!(path = %app_data_dir.display(), "app state initialized");
 
@@ -2172,6 +2231,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::{
+        path::{Path, PathBuf},
         sync::{atomic::Ordering, Arc, Mutex},
         time::Duration,
     };
@@ -2179,6 +2239,7 @@ mod tests {
     use async_trait::async_trait;
     use tauri::PhysicalPosition;
     use tokio::sync::{oneshot, Notify};
+    use uuid::Uuid;
 
     use crate::{
         hotkey_service::{HotkeyConfig, RecordingMode},
@@ -2196,13 +2257,36 @@ mod tests {
     use super::{
         active_pipeline_session_id, apply_hotkey_from_settings_with_fallback,
         apply_settings_transaction_with_hooks, cancel_recording_with_hooks,
-        handle_audio_input_stream_error_with_hooks, has_api_key,
-        load_startup_settings_with_fallback, overlay_position_from_work_area,
-        permission_preflight_error_message, should_show_overlay_for_status,
-        spawn_pipeline_stage_error_reset, AppState, PipelineRuntimeState,
-        OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
+        copy_directory_contents, handle_audio_input_stream_error_with_hooks, has_api_key,
+        load_startup_settings_with_fallback, migrate_legacy_app_data_dir,
+        overlay_position_from_work_area, permission_preflight_error_message,
+        should_show_overlay_for_status, spawn_pipeline_stage_error_reset, AppState,
+        PipelineRuntimeState, OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
     };
     use crate::permission_service::{PermissionState, PermissionType};
+
+    #[derive(Debug)]
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("temporary directory should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[derive(Debug, Default)]
     struct SessionEventLog {
@@ -3347,6 +3431,87 @@ mod tests {
         assert!(error.contains("Failed to persist settings: disk full"));
         assert!(error.contains("Failed to roll back launch-at-login state"));
         assert!(error.contains("Failed to roll back hotkey config"));
+    }
+
+    #[test]
+    fn copy_directory_contents_copies_nested_files() {
+        let temp_dir = TempDirGuard::new("voice-copy-directory-contents");
+        let source_dir = temp_dir.path().join("source");
+        let destination_dir = temp_dir.path().join("destination");
+        let nested_source_dir = source_dir.join("nested");
+        std::fs::create_dir_all(&nested_source_dir).expect("nested source directory should exist");
+        std::fs::write(source_dir.join("settings.json"), b"{\"autoInsert\":true}")
+            .expect("settings should be written");
+        std::fs::write(nested_source_dir.join("history.json"), b"[]")
+            .expect("history should be written");
+
+        copy_directory_contents(&source_dir, &destination_dir)
+            .expect("copy helper should copy source directory contents");
+
+        assert_eq!(
+            std::fs::read(destination_dir.join("settings.json"))
+                .expect("destination settings should exist"),
+            b"{\"autoInsert\":true}"
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.join("nested").join("history.json"))
+                .expect("destination history should exist"),
+            b"[]"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_app_data_dir_copies_when_legacy_exists_and_new_is_missing() {
+        let temp_dir = TempDirGuard::new("voice-legacy-app-data-migration");
+        let app_support_dir = temp_dir.path().join("Application Support");
+        let legacy_app_data_dir = app_support_dir.join("com.sawyerhood.voice");
+        let new_app_data_dir = app_support_dir.join("com.sawyerhood.buzz");
+        std::fs::create_dir_all(legacy_app_data_dir.join("nested"))
+            .expect("legacy app data directory should exist");
+        std::fs::write(legacy_app_data_dir.join("api-key.json"), b"secret")
+            .expect("legacy api key should be written");
+        std::fs::write(
+            legacy_app_data_dir.join("nested").join("stats.json"),
+            b"{\"words\":42}",
+        )
+        .expect("legacy stats should be written");
+
+        migrate_legacy_app_data_dir(&new_app_data_dir);
+
+        assert_eq!(
+            std::fs::read(new_app_data_dir.join("api-key.json"))
+                .expect("new app data should include copied api key"),
+            b"secret"
+        );
+        assert_eq!(
+            std::fs::read(new_app_data_dir.join("nested").join("stats.json"))
+                .expect("new app data should include copied nested stats"),
+            b"{\"words\":42}"
+        );
+        assert!(legacy_app_data_dir.exists());
+    }
+
+    #[test]
+    fn migrate_legacy_app_data_dir_skips_when_new_directory_already_exists() {
+        let temp_dir = TempDirGuard::new("voice-legacy-app-data-skip");
+        let app_support_dir = temp_dir.path().join("Application Support");
+        let legacy_app_data_dir = app_support_dir.join("com.sawyerhood.voice");
+        let new_app_data_dir = app_support_dir.join("com.sawyerhood.buzz");
+        std::fs::create_dir_all(&legacy_app_data_dir)
+            .expect("legacy app data directory should exist");
+        std::fs::write(legacy_app_data_dir.join("history.json"), b"[\"legacy\"]")
+            .expect("legacy history should be written");
+        std::fs::create_dir_all(&new_app_data_dir).expect("new app data directory should exist");
+        std::fs::write(new_app_data_dir.join("history.json"), b"[\"new\"]")
+            .expect("new history should be written");
+
+        migrate_legacy_app_data_dir(&new_app_data_dir);
+
+        assert_eq!(
+            std::fs::read(new_app_data_dir.join("history.json"))
+                .expect("new history should remain unchanged"),
+            b"[\"new\"]"
+        );
     }
 
     #[test]
