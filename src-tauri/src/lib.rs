@@ -39,7 +39,8 @@ use permission_service::{PermissionService, PermissionSnapshot, PermissionState,
 use serde::Serialize;
 use settings_store::{
     SettingsStore, VoiceSettings, VoiceSettingsUpdate, RECORDING_MODE_HOLD_TO_TALK,
-    RECORDING_MODE_TOGGLE,
+    RECORDING_MODE_TOGGLE, TRANSCRIPTION_STYLE_CASUAL, TRANSCRIPTION_STYLE_CLEAN,
+    TRANSCRIPTION_STYLE_CUSTOM, TRANSCRIPTION_STYLE_VERBATIM,
 };
 use stats_store::{StatsStore, UsageStatsReport};
 use status_notifier::{AppStatus, StatusNotifier};
@@ -81,6 +82,10 @@ const OVERLAY_WINDOW_HEIGHT: f64 =
     OVERLAY_PILL_HEIGHT + OVERLAY_SHADOW_SAFE_TOP + OVERLAY_SHADOW_SAFE_BOTTOM;
 const OVERLAY_WINDOW_TOP_MARGIN: f64 = 12.0;
 const LEGACY_APP_IDENTIFIER: &str = "com.sawyerhood.voice";
+const CLEAN_TRANSCRIPTION_PROMPT: &str =
+    "Use proper punctuation, capitalization, and paragraph breaks. Write in complete sentences.";
+const CASUAL_TRANSCRIPTION_PROMPT: &str =
+    "Keep it casual and conversational. Use lowercase, minimal punctuation. Like texting a friend.";
 
 fn count_words(text: &str) -> u64 {
     text.split_whitespace().count() as u64
@@ -112,6 +117,23 @@ fn recording_mode_to_settings_value(mode: RecordingMode) -> &'static str {
     match mode {
         RecordingMode::HoldToTalk => RECORDING_MODE_HOLD_TO_TALK,
         RecordingMode::Toggle => RECORDING_MODE_TOGGLE,
+    }
+}
+
+fn resolve_transcription_prompt(style: &str, custom_prompt: &str) -> Option<String> {
+    match style.trim().to_lowercase().as_str() {
+        TRANSCRIPTION_STYLE_CLEAN => Some(CLEAN_TRANSCRIPTION_PROMPT.to_string()),
+        TRANSCRIPTION_STYLE_CASUAL => Some(CASUAL_TRANSCRIPTION_PROMPT.to_string()),
+        TRANSCRIPTION_STYLE_VERBATIM => None,
+        TRANSCRIPTION_STYLE_CUSTOM => {
+            let trimmed = custom_prompt.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        _ => Some(CLEAN_TRANSCRIPTION_PROMPT.to_string()),
     }
 }
 
@@ -704,8 +726,13 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
                 .realtime_transcription_client
                 .model_supports_realtime()
         {
+            let transcription_prompt = resolve_transcription_prompt(
+                &settings.transcription_style,
+                &settings.custom_transcription_prompt,
+            );
             let options = TranscriptionOptions {
                 language: settings.language.clone(),
+                prompt: transcription_prompt,
                 on_delta: Some(self.build_delta_callback()),
                 ..TranscriptionOptions::default()
             };
@@ -817,8 +844,13 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
 
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
         let settings = self.current_settings();
+        let transcription_prompt = resolve_transcription_prompt(
+            &settings.transcription_style,
+            &settings.custom_transcription_prompt,
+        );
         let options = TranscriptionOptions {
             language: settings.language,
+            prompt: transcription_prompt,
             on_delta: Some(self.build_delta_callback()),
             ..TranscriptionOptions::default()
         };
@@ -1904,6 +1936,18 @@ async fn transcribe_audio(
     set_status_for_state(&app, &state, AppStatus::Transcribing);
     let app_for_delta = app.clone();
     let mut request_options = options.unwrap_or_default();
+    let has_explicit_prompt = request_options
+        .prompt
+        .as_deref()
+        .map(|prompt| !prompt.trim().is_empty())
+        .unwrap_or(false);
+    if !has_explicit_prompt {
+        let settings = state.services.settings_store.current();
+        request_options.prompt = resolve_transcription_prompt(
+            &settings.transcription_style,
+            &settings.custom_transcription_prompt,
+        );
+    }
     request_options.on_delta = Some(Arc::new(move |delta| {
         emit_transcription_delta_event(&app_for_delta, &delta);
     }));
@@ -2281,9 +2325,9 @@ mod tests {
         copy_directory_contents, handle_audio_input_stream_error_with_hooks, has_api_key,
         load_startup_settings_with_fallback, migrate_legacy_app_data_dir,
         overlay_position_from_work_area, permission_preflight_error_message,
-        should_hide_main_window_on_startup, should_show_overlay_for_status,
-        spawn_pipeline_stage_error_reset, AppState, PipelineRuntimeState,
-        OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
+        resolve_transcription_prompt, should_hide_main_window_on_startup,
+        should_show_overlay_for_status, spawn_pipeline_stage_error_reset, AppState,
+        PipelineRuntimeState, OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
     };
     use crate::permission_service::{PermissionState, PermissionType};
 
@@ -3132,6 +3176,48 @@ mod tests {
 
         assert!(message.contains("Accessibility access is required"));
         assert!(message.contains("Privacy & Security > Accessibility"));
+    }
+
+    #[test]
+    fn resolve_transcription_prompt_returns_clean_preset() {
+        let prompt = resolve_transcription_prompt("clean", "ignored");
+        assert_eq!(
+            prompt,
+            Some(
+                "Use proper punctuation, capitalization, and paragraph breaks. Write in complete sentences."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_transcription_prompt_returns_casual_preset() {
+        let prompt = resolve_transcription_prompt("casual", "ignored");
+        assert_eq!(
+            prompt,
+            Some(
+                "Keep it casual and conversational. Use lowercase, minimal punctuation. Like texting a friend."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_transcription_prompt_returns_none_for_verbatim_preset() {
+        let prompt = resolve_transcription_prompt("verbatim", "ignored");
+        assert_eq!(prompt, None);
+    }
+
+    #[test]
+    fn resolve_transcription_prompt_returns_custom_prompt_for_custom_style() {
+        let prompt = resolve_transcription_prompt("custom", "  Include ums and pauses.  ");
+        assert_eq!(prompt, Some("Include ums and pauses.".to_string()));
+    }
+
+    #[test]
+    fn resolve_transcription_prompt_returns_none_for_empty_custom_prompt() {
+        let prompt = resolve_transcription_prompt("custom", "   ");
+        assert_eq!(prompt, None);
     }
 
     #[test]

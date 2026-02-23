@@ -1,7 +1,9 @@
 export const DEFAULT_HOTKEY_SHORTCUT = "Alt+Space";
 export const OPENAI_PROVIDER = "openai";
+export const DEFAULT_TRANSCRIPTION_STYLE = "clean";
 
 export type RecordingMode = "hold_to_talk" | "toggle";
+export type TranscriptionStyle = "clean" | "casual" | "verbatim" | "custom";
 
 type ShortcutCaptureEvent = Pick<
   KeyboardEvent,
@@ -13,6 +15,8 @@ type SettingsUpdateInput = {
   recordingMode: RecordingMode;
   microphoneId: string;
   language: string;
+  transcriptionStyle: TranscriptionStyle;
+  customTranscriptionPrompt: string;
   autoInsert: boolean;
   launchAtLogin: boolean;
 };
@@ -23,6 +27,8 @@ export type VoiceSettingsUpdatePayload = {
   microphone_id: string | null;
   language: string | null;
   transcription_provider: typeof OPENAI_PROVIDER;
+  transcription_style: TranscriptionStyle;
+  custom_transcription_prompt: string;
   auto_insert: boolean;
   launch_at_login: boolean;
 };
@@ -42,6 +48,13 @@ export function normalizeRecordingMode(value: string): RecordingMode {
   return "hold_to_talk";
 }
 
+export function normalizeTranscriptionStyle(value: string): TranscriptionStyle {
+  if (value === "casual") return "casual";
+  if (value === "verbatim") return "verbatim";
+  if (value === "custom") return "custom";
+  return DEFAULT_TRANSCRIPTION_STYLE;
+}
+
 export function createSettingsUpdatePayload(
   input: SettingsUpdateInput,
 ): VoiceSettingsUpdatePayload {
@@ -51,6 +64,8 @@ export function createSettingsUpdatePayload(
     microphone_id: normalizeOptionalText(input.microphoneId),
     language: normalizeOptionalText(input.language),
     transcription_provider: OPENAI_PROVIDER,
+    transcription_style: normalizeTranscriptionStyle(input.transcriptionStyle),
+    custom_transcription_prompt: input.customTranscriptionPrompt.trim(),
     auto_insert: input.autoInsert,
     launch_at_login: input.launchAtLogin,
   };

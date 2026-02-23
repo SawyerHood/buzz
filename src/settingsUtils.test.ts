@@ -7,6 +7,7 @@ import {
   normalizeOptionalText,
   normalizeRecordingMode,
   normalizeShortcut,
+  normalizeTranscriptionStyle,
   shortcutFromKeyboardEvent,
 } from "./settingsUtils";
 
@@ -38,6 +39,14 @@ describe("settingsUtils", () => {
     expect(normalizeRecordingMode("anything-else")).toBe("hold_to_talk");
   });
 
+  it("normalizes transcription style with a safe fallback", () => {
+    expect(normalizeTranscriptionStyle("clean")).toBe("clean");
+    expect(normalizeTranscriptionStyle("casual")).toBe("casual");
+    expect(normalizeTranscriptionStyle("verbatim")).toBe("verbatim");
+    expect(normalizeTranscriptionStyle("custom")).toBe("custom");
+    expect(normalizeTranscriptionStyle("unexpected")).toBe("clean");
+  });
+
   it("builds settings update payloads that match backend expectations", () => {
     expect(
       createSettingsUpdatePayload({
@@ -45,6 +54,8 @@ describe("settingsUtils", () => {
         recordingMode: "toggle",
         microphoneId: "  mic-1 ",
         language: "  fr ",
+        transcriptionStyle: "custom",
+        customTranscriptionPrompt: "  Keep filler words and pauses.  ",
         autoInsert: false,
         launchAtLogin: true,
       }),
@@ -54,6 +65,8 @@ describe("settingsUtils", () => {
       microphone_id: "mic-1",
       language: "fr",
       transcription_provider: "openai",
+      transcription_style: "custom",
+      custom_transcription_prompt: "Keep filler words and pauses.",
       auto_insert: false,
       launch_at_login: true,
     });
