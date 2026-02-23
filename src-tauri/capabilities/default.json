@@ -5,6 +5,7 @@
   "windows": ["main", "recording-overlay"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "updater:default"
   ]
 }

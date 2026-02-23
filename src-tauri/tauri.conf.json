@@ -29,6 +29,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/SawyerHood/voice/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4QjkzMzRGNkE5OEZDMjIKUldRaS9KaHFUek81U00rbFJ3RndDY1NYT0N5VjV6THM1dndyQnhyVXMwNk93ejMrRWJZQVBMb3YK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
