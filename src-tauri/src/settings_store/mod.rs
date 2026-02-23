@@ -14,6 +14,11 @@ pub const DEFAULT_HOTKEY_SHORTCUT: &str = "Alt+Space";
 pub const RECORDING_MODE_HOLD_TO_TALK: &str = "hold_to_talk";
 pub const RECORDING_MODE_TOGGLE: &str = "toggle";
 pub const DEFAULT_TRANSCRIPTION_PROVIDER: &str = "openai";
+pub const TRANSCRIPTION_STYLE_CLEAN: &str = "clean";
+pub const TRANSCRIPTION_STYLE_CASUAL: &str = "casual";
+pub const TRANSCRIPTION_STYLE_VERBATIM: &str = "verbatim";
+pub const TRANSCRIPTION_STYLE_CUSTOM: &str = "custom";
+pub const DEFAULT_TRANSCRIPTION_STYLE: &str = TRANSCRIPTION_STYLE_CLEAN;
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
@@ -25,6 +30,8 @@ pub struct VoiceSettings {
     pub microphone_id: Option<String>,
     pub language: Option<String>,
     pub transcription_provider: String,
+    pub transcription_style: String,
+    pub custom_transcription_prompt: String,
     pub auto_insert: bool,
     pub launch_at_login: bool,
     pub onboarding_completed: bool,
@@ -38,6 +45,8 @@ impl Default for VoiceSettings {
             microphone_id: None,
             language: None,
             transcription_provider: DEFAULT_TRANSCRIPTION_PROVIDER.to_string(),
+            transcription_style: DEFAULT_TRANSCRIPTION_STYLE.to_string(),
+            custom_transcription_prompt: String::new(),
             auto_insert: true,
             launch_at_login: false,
             onboarding_completed: false,
@@ -53,6 +62,9 @@ impl VoiceSettings {
         self.language = normalize_optional_string(self.language);
         self.transcription_provider =
             normalize_transcription_provider(self.transcription_provider)?;
+        self.transcription_style = normalize_transcription_style(self.transcription_style);
+        self.custom_transcription_prompt =
+            normalize_optional_string(Some(self.custom_transcription_prompt)).unwrap_or_default();
 
         Ok(self)
     }
@@ -76,6 +88,14 @@ impl VoiceSettings {
 
         if let Some(transcription_provider) = update.transcription_provider {
             self.transcription_provider = transcription_provider;
+        }
+
+        if let Some(transcription_style) = update.transcription_style {
+            self.transcription_style = transcription_style;
+        }
+
+        if let Some(custom_transcription_prompt) = update.custom_transcription_prompt {
+            self.custom_transcription_prompt = custom_transcription_prompt;
         }
 
         if let Some(auto_insert) = update.auto_insert {
@@ -102,6 +122,8 @@ pub struct VoiceSettingsUpdate {
     pub microphone_id: Option<Option<String>>,
     pub language: Option<Option<String>>,
     pub transcription_provider: Option<String>,
+    pub transcription_style: Option<String>,
+    pub custom_transcription_prompt: Option<String>,
     pub auto_insert: Option<bool>,
     pub launch_at_login: Option<bool>,
     pub onboarding_completed: Option<bool>,
@@ -399,6 +421,16 @@ fn normalize_transcription_provider(value: String) -> Result<String, String> {
     }
 }
 
+fn normalize_transcription_style(value: String) -> String {
+    match value.trim().to_lowercase().as_str() {
+        TRANSCRIPTION_STYLE_CLEAN => TRANSCRIPTION_STYLE_CLEAN.to_string(),
+        TRANSCRIPTION_STYLE_CASUAL => TRANSCRIPTION_STYLE_CASUAL.to_string(),
+        TRANSCRIPTION_STYLE_VERBATIM => TRANSCRIPTION_STYLE_VERBATIM.to_string(),
+        TRANSCRIPTION_STYLE_CUSTOM => TRANSCRIPTION_STYLE_CUSTOM.to_string(),
+        _ => DEFAULT_TRANSCRIPTION_STYLE.to_string(),
+    }
+}
+
 fn lock_error() -> String {
     "Settings store lock was poisoned".to_string()
 }
@@ -468,6 +500,8 @@ mod tests {
             defaults.transcription_provider,
             DEFAULT_TRANSCRIPTION_PROVIDER
         );
+        assert_eq!(defaults.transcription_style, DEFAULT_TRANSCRIPTION_STYLE);
+        assert_eq!(defaults.custom_transcription_prompt, "");
         assert!(defaults.auto_insert);
         assert!(!defaults.launch_at_login);
         assert!(!defaults.onboarding_completed);
@@ -516,6 +550,8 @@ mod tests {
 
         assert!(!loaded.launch_at_login);
         assert!(!loaded.onboarding_completed);
+        assert_eq!(loaded.transcription_style, DEFAULT_TRANSCRIPTION_STYLE);
+        assert_eq!(loaded.custom_transcription_prompt, "");
         cleanup_settings_path(&settings_path);
     }
 
@@ -533,6 +569,8 @@ mod tests {
                     microphone_id: Some(Some("mic-42".to_string())),
                     language: Some(Some("en".to_string())),
                     transcription_provider: Some("OpenAI".to_string()),
+                    transcription_style: Some("Casual".to_string()),
+                    custom_transcription_prompt: Some("   Keep filler words.  ".to_string()),
                     auto_insert: Some(false),
                     launch_at_login: Some(true),
                     onboarding_completed: Some(true),
@@ -547,6 +585,8 @@ mod tests {
         assert_eq!(updated.microphone_id.as_deref(), Some("mic-42"));
         assert_eq!(updated.language.as_deref(), Some("en"));
         assert_eq!(updated.transcription_provider, "openai");
+        assert_eq!(updated.transcription_style, "casual");
+        assert_eq!(updated.custom_transcription_prompt, "Keep filler words.");
         assert!(!updated.auto_insert);
         assert!(updated.launch_at_login);
         assert!(updated.onboarding_completed);

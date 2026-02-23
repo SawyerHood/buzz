@@ -21,9 +21,11 @@ import {
   createSettingsUpdatePayload,
   normalizeRecordingMode,
   normalizeShortcut,
+  normalizeTranscriptionStyle,
   OPENAI_PROVIDER,
   shortcutFromKeyboardEvent,
   type RecordingMode,
+  type TranscriptionStyle,
 } from "./settingsUtils";
 
 type VoiceSettings = {
@@ -31,6 +33,8 @@ type VoiceSettings = {
   recording_mode: string;
   microphone_id: string | null;
   language: string | null;
+  transcription_style: string;
+  custom_transcription_prompt: string;
   auto_insert: boolean;
   launch_at_login: boolean;
 };
@@ -58,6 +62,8 @@ type SettingsDraft = {
   recordingMode: RecordingMode;
   microphoneId: string;
   language: string;
+  transcriptionStyle: TranscriptionStyle;
+  customTranscriptionPrompt: string;
   autoInsert: boolean;
   launchAtLogin: boolean;
 };
@@ -113,6 +119,16 @@ const RECORDING_MODE_OPTIONS: ReadonlyArray<{
   { value: "toggle", label: "Toggle" },
 ];
 
+const TRANSCRIPTION_STYLE_OPTIONS: ReadonlyArray<{
+  value: TranscriptionStyle;
+  label: string;
+}> = [
+  { value: "clean", label: "Clean Prose (Default)" },
+  { value: "casual", label: "Casual" },
+  { value: "verbatim", label: "Verbatim" },
+  { value: "custom", label: "Custom" },
+];
+
 export default function Settings() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
@@ -132,6 +148,8 @@ export default function Settings() {
   const [microphones, setMicrophones] = useState<MicrophoneInfo[]>([]);
   const [microphoneId, setMicrophoneId] = useState("");
   const [language, setLanguage] = useState("");
+  const [transcriptionStyle, setTranscriptionStyle] = useState<TranscriptionStyle>("clean");
+  const [customTranscriptionPrompt, setCustomTranscriptionPrompt] = useState("");
   const [autoInsert, setAutoInsert] = useState(true);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [isRecordingShortcut, setIsRecordingShortcut] = useState(false);
@@ -175,6 +193,8 @@ export default function Settings() {
       setRecordingMode(normalizeRecordingMode(hotkeyConfig.mode || settings.recording_mode));
       setMicrophoneId(settings.microphone_id ?? "");
       setLanguage(settings.language ?? "");
+      setTranscriptionStyle(normalizeTranscriptionStyle(settings.transcription_style));
+      setCustomTranscriptionPrompt(settings.custom_transcription_prompt ?? "");
       setAutoInsert(settings.auto_insert);
       setLaunchAtLogin(settings.launch_at_login);
       setHasStoredApiKey(hasOpenAiKey);
@@ -248,6 +268,8 @@ export default function Settings() {
           recordingMode: draft.recordingMode,
           microphoneId: draft.microphoneId,
           language: draft.language,
+          transcriptionStyle: draft.transcriptionStyle,
+          customTranscriptionPrompt: draft.customTranscriptionPrompt,
           autoInsert: draft.autoInsert,
           launchAtLogin: draft.launchAtLogin,
         }),
@@ -256,6 +278,8 @@ export default function Settings() {
       setRecordingMode(normalizeRecordingMode(updatedSettings.recording_mode));
       setMicrophoneId(updatedSettings.microphone_id ?? "");
       setLanguage(updatedSettings.language ?? "");
+      setTranscriptionStyle(normalizeTranscriptionStyle(updatedSettings.transcription_style));
+      setCustomTranscriptionPrompt(updatedSettings.custom_transcription_prompt ?? "");
       setAutoInsert(updatedSettings.auto_insert);
       setLaunchAtLogin(updatedSettings.launch_at_login);
       setFeedback({ kind: "success", message: "Settings saved." });
@@ -288,17 +312,21 @@ export default function Settings() {
       recordingMode,
       microphoneId: nextMicrophoneId,
       language,
+      transcriptionStyle,
+      customTranscriptionPrompt,
       autoInsert,
       launchAtLogin,
     });
   }, [
     applySettingsUpdate,
     autoInsert,
+    customTranscriptionPrompt,
     hotkeyShortcut,
     language,
     launchAtLogin,
     microphoneId,
     recordingMode,
+    transcriptionStyle,
   ]);
 
   useEffect(() => {
@@ -346,6 +374,8 @@ export default function Settings() {
       recordingMode,
       microphoneId,
       language,
+      transcriptionStyle,
+      customTranscriptionPrompt,
       autoInsert,
       launchAtLogin,
     };
@@ -359,11 +389,13 @@ export default function Settings() {
   }, [
     applySettingsUpdate,
     autoInsert,
+    customTranscriptionPrompt,
     hotkeyShortcut,
     language,
     launchAtLogin,
     microphoneId,
     recordingMode,
+    transcriptionStyle,
   ]);
 
   async function handleRefreshMicrophones() {
@@ -665,6 +697,45 @@ export default function Settings() {
               Leave blank for auto-detection, or enter an ISO code (e.g. en, ja, fr).
             </p>
           </div>
+
+          {/* Transcription Style */}
+          <div className="space-y-1.5">
+            <Label htmlFor="transcription-style" className="text-xs">
+              Transcription Style
+            </Label>
+            <Select value={transcriptionStyle} onValueChange={(value) => setTranscriptionStyle(normalizeTranscriptionStyle(value))}>
+              <SelectTrigger id="transcription-style" className="h-8 text-xs">
+                <SelectValue placeholder="Select transcription style" />
+              </SelectTrigger>
+              <SelectContent>
+                {TRANSCRIPTION_STYLE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              Controls how polished or literal your transcript should be.
+            </p>
+          </div>
+
+          {transcriptionStyle === "custom" && (
+            <div className="space-y-1.5">
+              <Label htmlFor="custom-transcription-prompt" className="text-xs">
+                Custom Prompt
+              </Label>
+              <textarea
+                id="custom-transcription-prompt"
+                value={customTranscriptionPrompt}
+                onChange={(event) => setCustomTranscriptionPrompt(event.currentTarget.value)}
+                placeholder="Describe how the transcript should be formatted..."
+                spellCheck={false}
+                rows={4}
+                className="min-h-[96px] w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 
