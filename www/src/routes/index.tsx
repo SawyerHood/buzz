@@ -27,7 +27,7 @@ const features = [
   },
   {
     title: 'Lightweight & Native',
-    desc: 'Built with Tauri v2 and Rust. Tiny footprint, instant launch, zero bloat.',
+    desc: 'A lightweight native macOS app with a tiny footprint and instant launch.',
   },
 ]
 
@@ -56,6 +56,7 @@ function LandingPage() {
     <div className="min-h-screen">
       <Nav />
       <Hero />
+      <ChatGptCallout />
       <Features />
       <HowItWorks />
       <Footer />
@@ -135,6 +136,29 @@ function Hero() {
         </div>
       </div>
     </header>
+  )
+}
+
+/* ─── chatgpt callout ────────────────────────────────────────────── */
+
+function ChatGptCallout() {
+  return (
+    <section className="pb-8 md:pb-12">
+      <div className="max-w-3xl mx-auto px-6">
+        <div className="rounded-2xl border border-neutral-200 bg-white/90 px-6 py-6 sm:px-7 sm:py-7">
+          <p className="text-xs font-medium uppercase tracking-[0.14em] text-neutral-500 mb-3">
+            New: ChatGPT login
+          </p>
+          <h2 className="text-xl sm:text-2xl font-semibold tracking-tight text-neutral-900 leading-snug">
+            Sign in with your ChatGPT account — no API key required.
+          </h2>
+          <p className="mt-3 text-sm sm:text-base text-neutral-600 leading-relaxed max-w-2xl">
+            If you already have a ChatGPT subscription, just log in and start using Buzz immediately.
+            No key generation or copy-paste setup.
+          </p>
+        </div>
+      </div>
+    </section>
   )
 }
 
