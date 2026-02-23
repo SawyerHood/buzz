@@ -12,11 +12,14 @@ export const Route = createRootRoute({
       { property: 'og:description', content: 'Lightning-fast voice-to-text that types where your cursor is.' },
       { property: 'og:image', content: '/header.png' },
       { property: 'og:type', content: 'website' },
-      { name: 'theme-color', content: '#f59e0b' },
+      { name: 'theme-color', content: '#d97706' },
     ],
     links: [
       { rel: 'stylesheet', href: appCss },
       { rel: 'icon', href: '/favicon.ico' },
+      { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+      { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: 'anonymous' },
+      { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap' },
     ],
   }),
   shellComponent: RootDocument,
@@ -28,7 +31,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body className="bg-amber-50 text-gray-900 antialiased">
+      <body className="bg-[#fafafa] text-neutral-900 antialiased">
         {children}
         <Scripts />
       </body>
