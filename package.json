@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:install": "tauri build && cp -r src-tauri/target/release/bundle/macos/*.app /Applications/",
+    "build:release": "TAURI_SIGNING_PRIVATE_KEY_PATH=${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.tauri/buzz.key} TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:?Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD} tauri build",
+    "build:install": "pnpm build:release && cp -r src-tauri/target/release/bundle/macos/*.app /Applications/",
     "notarize": "xcrun notarytool submit src-tauri/target/release/bundle/dmg/*.dmg --keychain-profile buzz-notarize --wait",
     "staple": "xcrun stapler staple src-tauri/target/release/bundle/dmg/*.dmg",
     "release": "pnpm tauri build && pnpm notarize && pnpm staple",
@@ -21,6 +22,7 @@
     "@tailwindcss/vite": "^4.2.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-updater": "^2.10.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.575.0",

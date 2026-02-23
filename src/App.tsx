@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   Mic,
   History,
@@ -579,6 +580,9 @@ function App() {
   const [lastTranscript, setLastTranscript] = useState("");
   const [historyRefreshSignal, setHistoryRefreshSignal] = useState(0);
   const [backendSynced, setBackendSynced] = useState<boolean>(true);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateErrorMessage, setUpdateErrorMessage] = useState("");
   const activeViewRef = useRef<AppView>(activeView);
 
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
@@ -619,6 +623,28 @@ function App() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    if (onboardingState !== "completed") return undefined;
+
+    let isMounted = true;
+
+    async function checkForUpdatesOnLaunch() {
+      try {
+        const update = await check();
+        if (isMounted) {
+          setAvailableUpdate(update);
+        }
+      } catch {
+        // Keep launch resilient even if update checks fail.
+      }
+    }
+
+    void checkForUpdatesOnLaunch();
+    return () => {
+      isMounted = false;
+    };
+  }, [onboardingState]);
 
   const refreshPermissions = useCallback(async () => {
     setIsRefreshingPermissions(true);
@@ -690,6 +716,24 @@ function App() {
     setPermissionCardDismissedState(true);
     setPermissionCardDismissed(true);
   }, []);
+
+  const installAvailableUpdate = useCallback(() => {
+    if (!availableUpdate || isInstallingUpdate) return;
+
+    void (async () => {
+      setIsInstallingUpdate(true);
+      setUpdateErrorMessage("");
+
+      try {
+        await availableUpdate.downloadAndInstall();
+        setAvailableUpdate(null);
+      } catch (error) {
+        setUpdateErrorMessage(toErrorMessage(error, "Failed to install update."));
+      } finally {
+        setIsInstallingUpdate(false);
+      }
+    })();
+  }, [availableUpdate, isInstallingUpdate]);
 
   useEffect(() => {
     activeViewRef.current = activeView;
@@ -921,6 +965,27 @@ function App() {
               {VIEW_TITLES[activeView]}
             </h1>
           </header>
+
+          {availableUpdate && (
+            <div className="shrink-0 border-b border-emerald-500/20 bg-emerald-50/60 px-4 py-2 dark:bg-emerald-950/20">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-medium text-emerald-900 dark:text-emerald-100">
+                  A new version of Buzz is available.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={installAvailableUpdate}
+                  disabled={isInstallingUpdate}
+                >
+                  {isInstallingUpdate ? "Updating..." : "Update Now"}
+                </Button>
+              </div>
+              {updateErrorMessage && (
+                <p className="mt-1 text-[11px] text-destructive">{updateErrorMessage}</p>
+              )}
+            </div>
+          )}
 
           {/* Content body */}
           <div className="h-0 flex-1 overflow-y-auto">

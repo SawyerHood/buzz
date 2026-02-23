@@ -2069,6 +2069,7 @@ pub fn run() {
             None::<Vec<&str>>,
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(HotkeyService::new())
         .manage(PipelineRuntimeState::default())
         .setup(|app| {

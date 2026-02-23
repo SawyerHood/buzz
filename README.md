@@ -72,6 +72,40 @@ Build output:
 
 - `.app` bundle: `src-tauri/target/release/bundle/macos/`
 
+## Auto Updates (GitHub Releases)
+
+Buzz uses Tauri's updater plugin and checks:
+
+- `https://github.com/SawyerHood/voice/releases/latest/download/latest.json`
+
+### Signing prerequisites
+
+Update artifacts must be signed at build time.
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/buzz.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<your-key-password>"
+pnpm build:release
+```
+
+`pnpm build:release` runs `tauri build` with signing env vars so updater signatures are generated.
+
+### Release artifact format
+
+When signing is configured, Tauri generates updater signatures (`.sig`) and update metadata consumed by the updater endpoint. The release must publish `latest.json` in this shape:
+
+```json
+{
+  "version": "0.1.0",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "...",
+      "url": "https://github.com/SawyerHood/voice/releases/download/v0.1.0/Buzz.app.tar.gz.sig"
+    }
+  }
+}
+```
+
 ## Permissions Needed (macOS)
 
 Buzz requires:
