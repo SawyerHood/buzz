@@ -98,11 +98,16 @@ function Hero() {
   return (
     <header className="pt-28 pb-24 md:pt-36 md:pb-32">
       <div className="max-w-3xl mx-auto px-6">
-        {/* Video placeholder */}
+        {/* Product video */}
         <div className="mb-12 animate-fade-up">
-          <div className="aspect-video w-full max-w-3xl mx-auto rounded-lg bg-gray-100 border border-gray-200 flex items-center justify-center">
-            <span className="text-gray-400 text-sm">Product video coming soon</span>
-          </div>
+          <video
+            className="aspect-video w-full max-w-3xl mx-auto rounded-lg"
+            src="https://dobrowser.net/voice-memo.mp4"
+            autoPlay
+            loop
+            muted
+            playsInline
+          />
         </div>
 
         <div className="animate-fade-up" style={{ animationDelay: '100ms' }}>
