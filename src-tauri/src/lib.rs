@@ -1427,6 +1427,23 @@ fn get_settings(state: tauri::State<'_, AppState>) -> VoiceSettings {
 }
 
 #[tauri::command]
+fn get_onboarding_status(state: tauri::State<'_, AppState>) -> bool {
+    state.services.settings_store.current().onboarding_completed
+}
+
+#[tauri::command]
+fn complete_onboarding(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    state.services.settings_store.update(
+        &app,
+        VoiceSettingsUpdate {
+            onboarding_completed: Some(true),
+            ..VoiceSettingsUpdate::default()
+        },
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
 fn update_settings(
     app: AppHandle,
     update: VoiceSettingsUpdate,
@@ -1550,6 +1567,11 @@ fn get_chatgpt_auth_status(
 }
 
 #[tauri::command]
+fn get_auth_status(state: tauri::State<'_, AppState>) -> Result<Option<ChatGptAuthStatus>, String> {
+    get_chatgpt_auth_status(state)
+}
+
+#[tauri::command]
 async fn start_chatgpt_login(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -1570,10 +1592,27 @@ async fn start_chatgpt_login(
 }
 
 #[tauri::command]
+async fn start_oauth_login(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChatGptAuthStatus, String> {
+    start_chatgpt_login(app, state).await
+}
+
+#[tauri::command]
 fn logout_chatgpt(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("ChatGPT OAuth logout requested");
     state.services.auth_store.logout_chatgpt()?;
     Ok(())
+}
+
+#[tauri::command]
+fn save_api_key(
+    provider: String,
+    key: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    set_api_key(provider, key, state)
 }
 
 #[tauri::command]
@@ -1645,6 +1684,22 @@ fn request_permission(
     state: tauri::State<'_, AppState>,
 ) -> Result<PermissionSnapshot, String> {
     state.services.permission_service.request_permission(r#type)
+}
+
+#[tauri::command]
+fn request_mic_permission(state: tauri::State<'_, AppState>) -> Result<PermissionSnapshot, String> {
+    state
+        .services
+        .permission_service
+        .request_microphone_permission()
+}
+
+#[tauri::command]
+fn open_accessibility_settings(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state
+        .services
+        .permission_service
+        .open_accessibility_settings()
 }
 
 #[tauri::command]
@@ -2070,6 +2125,8 @@ pub fn run() {
             get_status,
             set_status,
             get_settings,
+            get_onboarding_status,
+            complete_onboarding,
             update_settings,
             apply_settings,
             get_launch_at_login,
@@ -2078,13 +2135,18 @@ pub fn run() {
             get_auth_method,
             set_auth_method,
             get_chatgpt_auth_status,
+            get_auth_status,
             start_chatgpt_login,
+            start_oauth_login,
             logout_chatgpt,
+            save_api_key,
             set_api_key,
             delete_api_key,
             list_microphones,
             check_permissions,
             request_permission,
+            request_mic_permission,
+            open_accessibility_settings,
             start_recording,
             stop_recording,
             cancel_recording,

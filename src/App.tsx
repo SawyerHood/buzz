@@ -28,9 +28,11 @@ import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/use-dark-mode";
 import HistoryPanel from "./HistoryPanel";
 import Settings from "./Settings";
+import Onboarding from "./Onboarding";
 
 type AppStatus = "idle" | "listening" | "transcribing" | "error";
 type AppView = "dashboard" | "history" | "settings";
+type OnboardingState = "loading" | "required" | "completed";
 type PermissionState = "not_determined" | "granted" | "denied";
 type PermissionType = "microphone" | "accessibility";
 type TranscriptReadyEvent = { text: string };
@@ -569,6 +571,7 @@ const VIEW_TITLES: Record<AppView, string> = {
 function App() {
   useDarkMode();
 
+  const [onboardingState, setOnboardingState] = useState<OnboardingState>("loading");
   const [status, setStatus] = useState<AppStatus>("idle");
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [errorMessage, setErrorMessage] = useState("");
@@ -590,6 +593,28 @@ function App() {
     () => readPermissionCardDismissed()
   );
   const statusRef = useRef<AppStatus>("idle");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadOnboardingState() {
+      try {
+        const completed = await invoke<boolean>("get_onboarding_status");
+        if (isMounted) {
+          setOnboardingState(completed ? "completed" : "required");
+        }
+      } catch {
+        if (isMounted) {
+          setOnboardingState("completed");
+        }
+      }
+    }
+
+    void loadOnboardingState();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     statusRef.current = status;
@@ -671,6 +696,8 @@ function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (onboardingState !== "completed") return undefined;
+
     let isMounted = true;
     let unlistenFns: UnlistenFn[] = [];
 
@@ -759,9 +786,11 @@ function App() {
       isMounted = false;
       unlistenFns.forEach((dispose) => dispose());
     };
-  }, [refreshUsageStats]);
+  }, [onboardingState, refreshUsageStats]);
 
   useEffect(() => {
+    if (onboardingState !== "completed") return undefined;
+
     function handleWindowFocus() {
       void refreshPermissions();
       if (activeViewRef.current === "dashboard") {
@@ -770,12 +799,13 @@ function App() {
     }
     window.addEventListener("focus", handleWindowFocus);
     return () => window.removeEventListener("focus", handleWindowFocus);
-  }, [refreshPermissions, refreshUsageStats]);
+  }, [onboardingState, refreshPermissions, refreshUsageStats]);
 
   useEffect(() => {
+    if (onboardingState !== "completed") return;
     if (activeView !== "dashboard") return;
     void refreshUsageStats();
-  }, [activeView, refreshUsageStats]);
+  }, [activeView, onboardingState, refreshUsageStats]);
 
   const hasMissingPermissions = useMemo(
     () => !permissions || !permissions.allGranted,
@@ -805,6 +835,18 @@ function App() {
         return "bg-muted-foreground";
     }
   }, [status]);
+
+  if (onboardingState === "loading") {
+    return (
+      <main className="flex h-screen items-center justify-center">
+        <p className="text-sm text-muted-foreground">Loading Buzz...</p>
+      </main>
+    );
+  }
+
+  if (onboardingState === "required") {
+    return <Onboarding onComplete={() => setOnboardingState("completed")} />;
+  }
 
   return (
     <TooltipProvider delayDuration={400}>

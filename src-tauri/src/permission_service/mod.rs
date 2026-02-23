@@ -55,8 +55,8 @@ impl PermissionService {
     }
 
     pub fn check_permissions(&self) -> PermissionSnapshot {
-        let microphone = self.microphone_permission();
-        let accessibility = self.accessibility_permission();
+        let microphone = self.check_microphone_permission();
+        let accessibility = self.check_accessibility_permission();
         PermissionSnapshot::new(microphone, accessibility)
     }
 
@@ -118,6 +118,27 @@ impl PermissionService {
         }
 
         Ok(self.check_permissions())
+    }
+
+    pub fn check_microphone_permission(&self) -> PermissionState {
+        self.microphone_permission()
+    }
+
+    pub fn request_microphone_permission(&self) -> Result<PermissionSnapshot, String> {
+        self.request_permission(PermissionType::Microphone)
+    }
+
+    pub fn check_accessibility_permission(&self) -> PermissionState {
+        self.accessibility_permission()
+    }
+
+    pub fn open_accessibility_settings(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            open_system_settings(ACCESSIBILITY_SETTINGS_URL)?;
+        }
+
+        Ok(())
     }
 }
 

@@ -28,6 +28,7 @@ pub struct VoiceSettings {
     pub transcription_provider: String,
     pub auto_insert: bool,
     pub launch_at_login: bool,
+    pub onboarding_completed: bool,
 }
 
 impl Default for VoiceSettings {
@@ -40,6 +41,7 @@ impl Default for VoiceSettings {
             transcription_provider: DEFAULT_TRANSCRIPTION_PROVIDER.to_string(),
             auto_insert: true,
             launch_at_login: false,
+            onboarding_completed: false,
         }
     }
 }
@@ -85,6 +87,10 @@ impl VoiceSettings {
             self.launch_at_login = launch_at_login;
         }
 
+        if let Some(onboarding_completed) = update.onboarding_completed {
+            self.onboarding_completed = onboarding_completed;
+        }
+
         self.normalized()
     }
 }
@@ -99,6 +105,7 @@ pub struct VoiceSettingsUpdate {
     pub transcription_provider: Option<String>,
     pub auto_insert: Option<bool>,
     pub launch_at_login: Option<bool>,
+    pub onboarding_completed: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -466,6 +473,7 @@ mod tests {
         );
         assert!(defaults.auto_insert);
         assert!(!defaults.launch_at_login);
+        assert!(!defaults.onboarding_completed);
     }
 
     #[test]
@@ -510,6 +518,7 @@ mod tests {
             .expect("legacy settings should load");
 
         assert!(!loaded.launch_at_login);
+        assert!(!loaded.onboarding_completed);
         cleanup_settings_path(&settings_path);
     }
 
@@ -529,6 +538,7 @@ mod tests {
                     transcription_provider: Some("OpenAI".to_string()),
                     auto_insert: Some(false),
                     launch_at_login: Some(true),
+                    onboarding_completed: Some(true),
                 },
             )
             .expect("update should succeed");
@@ -542,6 +552,7 @@ mod tests {
         assert_eq!(updated.transcription_provider, "openai");
         assert!(!updated.auto_insert);
         assert!(updated.launch_at_login);
+        assert!(updated.onboarding_completed);
         assert_eq!(reloaded, updated);
 
         cleanup_settings_path(&settings_path);
