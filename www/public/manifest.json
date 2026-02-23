@@ -1,0 +1,8 @@
+{
+  "short_name": "Buzz",
+  "name": "Buzz — Voice-to-text for macOS",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#f59e0b",
+  "background_color": "#fffbeb"
+}

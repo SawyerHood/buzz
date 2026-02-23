@@ -9,7 +9,9 @@
     "build:install": "tauri build && cp -r src-tauri/target/release/bundle/macos/*.app /Applications/",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "www:dev": "cd www && pnpm dev",
+    "www:build": "cd www && pnpm build"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.0",
