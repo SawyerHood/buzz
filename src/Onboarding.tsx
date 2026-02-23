@@ -84,8 +84,7 @@ function stopInstruction(mode: RecordingMode): string {
 }
 
 function normalizeOnboardingRecordingMode(value: string): RecordingMode {
-  const normalized = normalizeRecordingMode(value);
-  return normalized === "double_tap_toggle" ? "toggle" : normalized;
+  return normalizeRecordingMode(value);
 }
 
 function ShortcutKeycaps({
