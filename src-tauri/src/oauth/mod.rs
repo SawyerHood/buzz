@@ -3,7 +3,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,8 +25,6 @@ const OAUTH_CALLBACK_BIND_HOST: &str = "127.0.0.1";
 const OAUTH_CALLBACK_BIND_PORT: u16 = 1455;
 const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const OAUTH_TIMEOUT_SECS: u64 = 300;
-const CHATGPT_HOME_URL: &str = "https://chatgpt.com/";
-pub const CHATGPT_AUTH_WINDOW_LABEL: &str = "chatgpt-auth";
 const OAUTH_ORIGINATOR: &str = "pi";
 
 const SUCCESS_HTML: &str = "<!doctype html>\
@@ -98,8 +96,6 @@ pub async fn start_chatgpt_login<R: Runtime>(
     let refresh_token = normalize_required_string(token_response.refresh_token, "refresh_token")?;
     let account_id = extract_chatgpt_account_id(&token_response.access_token)
         .ok_or_else(|| "OAuth token did not include a ChatGPT account id claim".to_string())?;
-
-    seed_auth_window_after_login(app);
 
     Ok(OAuthLoginResult {
         access_token: token_response.access_token,
@@ -191,48 +187,6 @@ fn open_authorize_url_in_system_browser<R: Runtime>(
     app.opener()
         .open_url(authorize_url.as_str(), None::<&str>)
         .map_err(|error| format!("Failed to open OAuth URL in system browser: {error}"))
-}
-
-fn seed_auth_window_after_login<R: Runtime>(app: &AppHandle<R>) {
-    let window = match ensure_auth_window(app) {
-        Ok(window) => window,
-        Err(error) => {
-            warn!(%error, "failed to create ChatGPT auth webview after OAuth login");
-            return;
-        }
-    };
-
-    if let Ok(url) = Url::parse(CHATGPT_HOME_URL) {
-        if let Err(error) = window.navigate(url) {
-            warn!(%error, "failed to navigate ChatGPT auth webview to chatgpt.com");
-        }
-    }
-
-    if let Err(error) = window.hide() {
-        warn!(%error, "failed to hide ChatGPT auth webview after OAuth login");
-    }
-}
-
-fn ensure_auth_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, String> {
-    if let Some(window) = app.get_webview_window(CHATGPT_AUTH_WINDOW_LABEL) {
-        return Ok(window);
-    }
-
-    let initial_url = Url::parse(CHATGPT_HOME_URL)
-        .map_err(|error| format!("Invalid ChatGPT warmup URL: {error}"))?;
-
-    WebviewWindowBuilder::new(
-        app,
-        CHATGPT_AUTH_WINDOW_LABEL,
-        WebviewUrl::External(initial_url),
-    )
-    .title("Login with ChatGPT")
-    .inner_size(980.0, 760.0)
-    .min_inner_size(700.0, 520.0)
-    .resizable(true)
-    .visible(false)
-    .build()
-    .map_err(|error| format!("Failed to create ChatGPT auth webview: {error}"))
 }
 
 async fn wait_for_callback(
