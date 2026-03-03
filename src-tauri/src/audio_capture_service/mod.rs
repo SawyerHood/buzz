@@ -347,10 +347,13 @@ fn await_worker_startup(
         }
         Err(RecvTimeoutError::Timeout) => {
             let _ = stop_tx.send(());
-            if join_handle.take().is_some() {
-                warn!("detaching microphone worker after startup timeout");
+            if let Some(handle) = join_handle.take() {
+                spawn_worker_reaper_after_startup_timeout(handle, timeout);
             }
-            error!("microphone worker timed out while starting");
+            error!(
+                timeout_ms = timeout.as_millis(),
+                "microphone worker timed out while starting"
+            );
             Err("Timed out while starting microphone stream".to_string())
         }
         Err(RecvTimeoutError::Disconnected) => {
@@ -361,6 +364,28 @@ fn await_worker_startup(
             Err("Microphone stream failed to initialize".to_string())
         }
     }
+}
+
+fn spawn_worker_reaper_after_startup_timeout(handle: JoinHandle<()>, timeout: Duration) {
+    let worker_thread_id = format!("{:?}", handle.thread().id());
+    warn!(
+        worker_thread_id = %worker_thread_id,
+        timeout_ms = timeout.as_millis(),
+        "microphone worker startup timed out; scheduled background join reaper"
+    );
+    thread::spawn(move || {
+        if handle.join().is_err() {
+            error!(
+                worker_thread_id = %worker_thread_id,
+                "microphone worker panicked while reaping after startup timeout"
+            );
+        } else {
+            warn!(
+                worker_thread_id = %worker_thread_id,
+                "microphone worker exited after startup-timeout stop request"
+            );
+        }
+    });
 }
 
 fn recording_thread_main(
@@ -813,6 +838,7 @@ fn macos_default_input_device_id() -> Option<u32> {
 #[cfg(target_os = "macos")]
 fn macos_collect_coreaudio_device_identities_in_global_order(
 ) -> Result<Vec<MacosCoreAudioDeviceIdentity>, String> {
+    use core_foundation_sys::base::CFRelease;
     use core_foundation_sys::string::{
         kCFStringEncodingUTF8, CFStringGetCString, CFStringGetCStringPtr, CFStringRef,
     };
@@ -897,27 +923,35 @@ fn macos_collect_coreaudio_device_identities_in_global_order(
             return None;
         }
 
-        let c_string_ptr = unsafe { CFStringGetCStringPtr(cf_string, kCFStringEncodingUTF8) };
-        if !c_string_ptr.is_null() {
-            let value = unsafe { CStr::from_ptr(c_string_ptr as *const c_char) };
-            return Some(value.to_string_lossy().into_owned());
-        }
-
-        let mut buffer = [0i8; 512];
-        let copied = unsafe {
-            CFStringGetCString(
-                cf_string,
-                buffer.as_mut_ptr(),
-                buffer.len() as isize,
-                kCFStringEncodingUTF8,
-            )
+        let value = {
+            let c_string_ptr = unsafe { CFStringGetCStringPtr(cf_string, kCFStringEncodingUTF8) };
+            if !c_string_ptr.is_null() {
+                let value = unsafe { CStr::from_ptr(c_string_ptr as *const c_char) };
+                Some(value.to_string_lossy().into_owned())
+            } else {
+                let mut buffer = [0i8; 512];
+                let copied = unsafe {
+                    CFStringGetCString(
+                        cf_string,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as isize,
+                        kCFStringEncodingUTF8,
+                    )
+                };
+                if copied == 0 {
+                    None
+                } else {
+                    let value = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+                    Some(value.to_string_lossy().into_owned())
+                }
+            }
         };
-        if copied == 0 {
-            return None;
+
+        unsafe {
+            CFRelease(cf_string as *const _);
         }
 
-        let value = unsafe { CStr::from_ptr(buffer.as_ptr()) };
-        Some(value.to_string_lossy().into_owned())
+        value
     }
 
     fn device_supports_input(device_id: AudioDeviceID) -> bool {

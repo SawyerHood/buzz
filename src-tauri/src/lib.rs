@@ -56,7 +56,7 @@ use tracing::{debug, error, info, warn};
 use transcription::chatgpt::{ChatGptTranscriptionConfig, ChatGptTranscriptionProvider};
 use transcription::openai::{OpenAiTranscriptionConfig, OpenAiTranscriptionProvider};
 use transcription::realtime::{
-    OpenAiRealtimeTranscriptionClient, OpenAiRealtimeTranscriptionConfig,
+    OpenAiRealtimeTranscriptionClient, OpenAiRealtimeTranscriptionConfig, RealtimeAppendOutcome,
     RealtimeTranscriptionSession,
 };
 use transcription::{TranscriptionOptions, TranscriptionOrchestrator, TranscriptionProvider};
@@ -779,17 +779,32 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
                 let audio_sender = session.audio_sender();
                 let append_error_logged = Arc::new(AtomicBool::new(false));
                 let append_error_logged_for_callback = Arc::clone(&append_error_logged);
+                let chunk_drop_logged = Arc::new(AtomicBool::new(false));
+                let chunk_drop_logged_for_callback = Arc::clone(&chunk_drop_logged);
                 let session_id = self.session_id;
                 Arc::new(move |chunk: AudioInputChunk| {
-                    if let Err(error) = audio_sender
+                    match audio_sender
                         .append_pcm16_mono(chunk.pcm16_mono_samples, chunk.sample_rate_hz)
                     {
-                        if !append_error_logged_for_callback.swap(true, Ordering::Relaxed) {
-                            warn!(
-                                session_id = ?session_id,
-                                error = %error,
-                                "failed to forward audio chunk to realtime transcription session"
-                            );
+                        Ok(RealtimeAppendOutcome::Queued) => {
+                            chunk_drop_logged_for_callback.store(false, Ordering::Relaxed);
+                        }
+                        Ok(RealtimeAppendOutcome::DroppedBackpressure) => {
+                            if !chunk_drop_logged_for_callback.swap(true, Ordering::Relaxed) {
+                                warn!(
+                                    session_id = ?session_id,
+                                    "realtime command buffer is full; dropping audio chunk"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            if !append_error_logged_for_callback.swap(true, Ordering::Relaxed) {
+                                warn!(
+                                    session_id = ?session_id,
+                                    error = %error,
+                                    "failed to forward audio chunk to realtime transcription session"
+                                );
+                            }
                         }
                     }
                 }) as AudioInputChunkCallback

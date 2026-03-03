@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const HISTORY_FILE_NAME: &str = "transcript_history.json";
 pub const MAX_HISTORY_PAGE_SIZE: usize = 200;
+pub const MAX_HISTORY_ENTRIES: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +90,15 @@ impl HistoryStore {
 
         let insert_at = entries.partition_point(|existing| existing.timestamp >= entry.timestamp);
         entries.insert(insert_at, entry);
+        if entries.len() > MAX_HISTORY_ENTRIES {
+            let pruned_entries = entries.len() - MAX_HISTORY_ENTRIES;
+            entries.truncate(MAX_HISTORY_ENTRIES);
+            info!(
+                pruned_entries,
+                max_entries = MAX_HISTORY_ENTRIES,
+                "pruned oldest history entries"
+            );
+        }
 
         self.write_entries(&entries)
     }
@@ -571,6 +581,43 @@ mod tests {
             .expect("list should respect page cap");
 
         assert_eq!(page.len(), MAX_HISTORY_PAGE_SIZE);
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn add_entry_prunes_oldest_entries_when_over_max() {
+        let (store, file_path, test_dir) = create_test_store();
+        let entry_count = MAX_HISTORY_ENTRIES + 25;
+
+        for index in 0..entry_count {
+            store
+                .add_entry(HistoryEntry {
+                    id: Uuid::new_v4().to_string(),
+                    text: format!("entry-{index}"),
+                    timestamp: format!("2026-01-01T00:00:{index:04}Z"),
+                    duration_secs: None,
+                    language: None,
+                    provider: "openai".to_string(),
+                })
+                .expect("entry should be added");
+        }
+
+        let persisted = fs::read_to_string(&file_path).expect("history file should be readable");
+        let entries: Vec<HistoryEntry> =
+            serde_json::from_str(&persisted).expect("history JSON should parse");
+        let expected_newest = format!("entry-{}", entry_count - 1);
+        let expected_oldest_retained = format!("entry-{}", entry_count - MAX_HISTORY_ENTRIES);
+
+        assert_eq!(entries.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(
+            entries.first().map(|entry| entry.text.as_str()),
+            Some(expected_newest.as_str())
+        );
+        assert_eq!(
+            entries.last().map(|entry| entry.text.as_str()),
+            Some(expected_oldest_retained.as_str())
+        );
+
         cleanup_test_dir(&test_dir);
     }
 }

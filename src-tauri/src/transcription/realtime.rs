@@ -23,7 +23,13 @@ const DEFAULT_OPENAI_REALTIME_MODEL: &str = "gpt-realtime";
 const DEFAULT_OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
 const OPENAI_REALTIME_BETA_HEADER_VALUE: &str = "realtime=v1";
 const DEFAULT_COMMIT_TIMEOUT_SECS: u64 = 20;
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 const REALTIME_OUTPUT_SAMPLE_RATE_HZ: u32 = 24_000;
+// Approximate 5 seconds of queued audio assuming ~20ms callback chunks (~50 chunks/sec).
+const REALTIME_COMMAND_BUFFER_DURATION_SECS: usize = 5;
+const REALTIME_EXPECTED_CHUNKS_PER_SECOND: usize = 50;
+const REALTIME_COMMAND_CHANNEL_CAPACITY: usize =
+    REALTIME_COMMAND_BUFFER_DURATION_SECS * REALTIME_EXPECTED_CHUNKS_PER_SECOND;
 const EVENT_SESSION_CREATED: &str = "session.created";
 const EVENT_SESSION_UPDATED: &str = "session.updated";
 const EVENT_SPEECH_STARTED: &str = "input_audio_buffer.speech_started";
@@ -134,7 +140,8 @@ impl OpenAiRealtimeTranscriptionClient {
 
         let api_key = self.api_key()?;
         let commit_timeout = Duration::from_secs(self.config.commit_timeout_secs.max(1));
-        let (command_tx, command_rx) = mpsc::unbounded_channel::<RealtimeCommand>();
+        let (command_tx, command_rx) =
+            mpsc::channel::<RealtimeCommand>(REALTIME_COMMAND_CHANNEL_CAPACITY);
         let (result_tx, result_rx) =
             oneshot::channel::<Result<TranscriptionResult, TranscriptionError>>();
 
@@ -197,7 +204,13 @@ impl OpenAiRealtimeTranscriptionClient {
 
 #[derive(Debug, Clone)]
 pub struct RealtimeAudioSender {
-    command_tx: mpsc::UnboundedSender<RealtimeCommand>,
+    command_tx: mpsc::Sender<RealtimeCommand>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeAppendOutcome {
+    Queued,
+    DroppedBackpressure,
 }
 
 impl RealtimeAudioSender {
@@ -205,29 +218,44 @@ impl RealtimeAudioSender {
         &self,
         samples: Vec<i16>,
         sample_rate_hz: u32,
-    ) -> Result<(), TranscriptionError> {
-        self.command_tx
-            .send(RealtimeCommand::Append(AudioChunk {
+    ) -> Result<RealtimeAppendOutcome, TranscriptionError> {
+        match self
+            .command_tx
+            .try_send(RealtimeCommand::Append(AudioChunk {
                 samples,
                 sample_rate_hz,
-            }))
+            })) {
+            Ok(()) => Ok(RealtimeAppendOutcome::Queued),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                Ok(RealtimeAppendOutcome::DroppedBackpressure)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TranscriptionError::Network(
+                "Realtime transcription session is no longer active".to_string(),
+            )),
+        }
+    }
+
+    pub fn close(&self) {
+        match self.command_tx.try_send(RealtimeCommand::Close) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let command_tx = self.command_tx.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = command_tx.send(RealtimeCommand::Close).await;
+                });
+            }
+        }
+    }
+
+    async fn commit(&self) -> Result<(), TranscriptionError> {
+        self.command_tx
+            .send(RealtimeCommand::Commit)
+            .await
             .map_err(|_| {
                 TranscriptionError::Network(
                     "Realtime transcription session is no longer active".to_string(),
                 )
             })
-    }
-
-    pub fn close(&self) {
-        let _ = self.command_tx.send(RealtimeCommand::Close);
-    }
-
-    fn commit(&self) -> Result<(), TranscriptionError> {
-        self.command_tx.send(RealtimeCommand::Commit).map_err(|_| {
-            TranscriptionError::Network(
-                "Realtime transcription session is no longer active".to_string(),
-            )
-        })
     }
 }
 
@@ -261,7 +289,7 @@ impl RealtimeTranscriptionSession {
             commit_timeout,
         } = self;
 
-        if let Err(commit_error) = audio_sender.commit() {
+        if let Err(commit_error) = audio_sender.commit().await {
             warn!(
                 error = %commit_error,
                 "realtime commit command was rejected; waiting for session result"
@@ -317,7 +345,7 @@ async fn run_realtime_session(
     config: OpenAiRealtimeTranscriptionConfig,
     api_key: String,
     options: TranscriptionOptions,
-    mut command_rx: mpsc::UnboundedReceiver<RealtimeCommand>,
+    mut command_rx: mpsc::Receiver<RealtimeCommand>,
 ) -> Result<TranscriptionResult, TranscriptionError> {
     let endpoint = resolve_realtime_endpoint(&config.endpoint)?;
     let mut request = endpoint.clone().into_client_request().map_err(|error| {
@@ -345,17 +373,34 @@ async fn run_realtime_session(
         transcription_model = %config.transcription_model,
         "connecting realtime transcription websocket"
     );
-    let (ws_stream, response) = connect_async(request).await.map_err(|error| {
-        let mapped = map_websocket_error(error);
-        warn!(
-            endpoint = %endpoint,
-            realtime_model = %config.realtime_model,
-            transcription_model = %config.transcription_model,
-            error = %mapped,
-            "failed to connect realtime transcription websocket"
-        );
-        mapped
-    })?;
+    let connect_timeout = Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS);
+    let (ws_stream, response) = tokio::time::timeout(connect_timeout, connect_async(request))
+        .await
+        .map_err(|_| {
+            let mapped = TranscriptionError::Network(format!(
+                "Timed out connecting realtime transcription websocket after {}s",
+                connect_timeout.as_secs()
+            ));
+            warn!(
+                endpoint = %endpoint,
+                realtime_model = %config.realtime_model,
+                transcription_model = %config.transcription_model,
+                error = %mapped,
+                "failed to connect realtime transcription websocket"
+            );
+            mapped
+        })?
+        .map_err(|error| {
+            let mapped = map_websocket_error(error);
+            warn!(
+                endpoint = %endpoint,
+                realtime_model = %config.realtime_model,
+                transcription_model = %config.transcription_model,
+                error = %mapped,
+                "failed to connect realtime transcription websocket"
+            );
+            mapped
+        })?;
     info!(
         endpoint = %endpoint,
         status = %response.status(),
@@ -927,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_and_wait_returns_session_error_when_commit_channel_is_closed() {
-        let (command_tx, command_rx) = mpsc::unbounded_channel::<RealtimeCommand>();
+        let (command_tx, command_rx) = mpsc::channel::<RealtimeCommand>(1);
         drop(command_rx);
         let (result_tx, result_rx) =
             oneshot::channel::<Result<TranscriptionResult, TranscriptionError>>();
@@ -1081,9 +1126,10 @@ mod tests {
             .expect("session should start");
 
         let sender = session.audio_sender();
-        sender
+        let append_outcome = sender
             .append_pcm16_mono(vec![0, 1_000, -1_000, 2_000], 24_000)
             .expect("audio append should be accepted");
+        assert_eq!(append_outcome, RealtimeAppendOutcome::Queued);
 
         let result = session
             .commit_and_wait()
