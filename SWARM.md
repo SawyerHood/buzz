@@ -19,3 +19,4 @@ Repository operating policy (applies to all swarm agents):
 - If a task is not already in a `~/worktrees` worktree, create/use one before making code changes.
 - This is a voice-to-text desktop app project (like WhisperFlow / SuperWhisper / Monologue).
 - Main repo lives at `~/voice`.
+- **This is a greenfield project** — don't worry about backwards compatibility. Move fast, refactor freely, and prioritize the best solution over preserving old patterns.
