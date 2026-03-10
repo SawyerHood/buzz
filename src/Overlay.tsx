@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { Square } from "lucide-react";
+import { reportRendererMemory } from "./debugMemory";
 import { formatElapsedLabel } from "./overlayUtils";
 import "./Overlay.css";
 
@@ -16,6 +17,7 @@ function Overlay() {
   const statusRef = useRef<AppStatus>("idle");
   const startedAtRef = useRef<number | null>(null);
   const stopInFlightRef = useRef(false);
+  const elapsedMsRef = useRef(0);
 
   useEffect(() => {
     let isMounted = true;
@@ -106,6 +108,39 @@ function Overlay() {
     return () => {
       window.clearInterval(interval);
     };
+  }, [status]);
+
+  useEffect(() => {
+    elapsedMsRef.current = elapsedMs;
+  }, [elapsedMs]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+
+    const report = (reason: string) =>
+      reportRendererMemory("overlay", reason, {
+        status: statusRef.current,
+        elapsedMs: elapsedMsRef.current,
+        listening: statusRef.current === "listening",
+      });
+
+    void report("mount");
+    const interval = window.setInterval(() => {
+      void report("interval");
+    }, 15000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    void reportRendererMemory("overlay", "status-change", {
+      status,
+      elapsedMs: elapsedMsRef.current,
+      listening: status === "listening",
+    });
   }, [status]);
 
   const isListening = status === "listening";

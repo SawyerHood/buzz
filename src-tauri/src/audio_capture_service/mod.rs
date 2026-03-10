@@ -33,13 +33,32 @@ pub struct MicrophoneInfo {
     pub channels: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedAudio {
-    pub wav_bytes: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wav_bytes: Option<Vec<u8>>,
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub duration_ms: u64,
+    pub device_id: String,
+    pub device_name: String,
+    #[serde(skip_serializing)]
+    pcm16_mono_samples: Vec<i16>,
+    #[serde(skip_serializing)]
+    sample_buffer_pool: Option<Arc<Mutex<Vec<Vec<i16>>>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioCaptureDebugSnapshot {
+    pub buffered_sample_count: usize,
+    pub buffered_sample_capacity: usize,
+    pub buffered_audio_bytes: usize,
+    pub reserved_audio_bytes: usize,
+    pub duration_ms: u64,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
     pub device_id: String,
     pub device_name: String,
 }
@@ -103,6 +122,7 @@ struct InputDeviceSelectionCandidate {
 pub struct AudioCaptureService {
     recording: Mutex<Option<RecordingControl>>,
     audio_level_bits: Arc<AtomicU32>,
+    sample_buffer_pool: Arc<Mutex<Vec<Vec<i16>>>>,
 }
 
 impl fmt::Debug for AudioCaptureService {
@@ -124,6 +144,7 @@ impl AudioCaptureService {
         Self {
             recording: Mutex::new(None),
             audio_level_bits: Arc::new(AtomicU32::new(0.0_f32.to_bits())),
+            sample_buffer_pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -167,7 +188,7 @@ impl AudioCaptureService {
         self.audio_level_bits
             .store(0.0_f32.to_bits(), Ordering::Relaxed);
 
-        let samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+        let samples = Arc::new(Mutex::new(self.take_reusable_sample_buffer()));
         let worker_samples = Arc::clone(&samples);
         let worker_level_bits = Arc::clone(&self.audio_level_bits);
         let worker_app_handle = app_handle.clone();
@@ -265,24 +286,34 @@ impl AudioCaptureService {
             duration_ms = (buffered_samples.len() as u64 * 1000) / u64::from(sample_rate_hz);
         }
 
-        let wav_bytes = pcm16_to_wav_bytes(&buffered_samples, sample_rate_hz, channels)?;
+        let estimated_wav_bytes = 44usize
+            .checked_add(
+                buffered_samples
+                    .len()
+                    .checked_mul(std::mem::size_of::<i16>())
+                    .ok_or_else(|| "WAV size estimate overflow".to_string())?,
+            )
+            .ok_or_else(|| "WAV size estimate overflow".to_string())?;
         info!(
             duration_ms,
             sample_rate_hz,
             channels,
             sample_count = buffered_samples.len(),
+            estimated_wav_bytes,
             device_id = %device_id,
             device_name = %device_name,
             "audio capture stopped"
         );
 
         Ok(RecordedAudio {
-            wav_bytes,
+            wav_bytes: None,
             sample_rate_hz,
             channels,
             duration_ms,
             device_id,
             device_name,
+            pcm16_mono_samples: buffered_samples,
+            sample_buffer_pool: Some(Arc::clone(&self.sample_buffer_pool)),
         })
     }
 
@@ -327,6 +358,136 @@ impl AudioCaptureService {
 
     pub fn get_audio_level(&self) -> f32 {
         f32::from_bits(self.audio_level_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn debug_snapshot(&self) -> Result<Option<AudioCaptureDebugSnapshot>, String> {
+        let recording_guard = self
+            .recording
+            .lock()
+            .map_err(|_| "Audio capture state lock is poisoned".to_string())?;
+        let Some(control) = recording_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        let sample_guard = control
+            .samples
+            .lock()
+            .map_err(|_| "Audio sample buffer lock is poisoned".to_string())?;
+        let buffered_sample_count = sample_guard.len();
+        let buffered_sample_capacity = sample_guard.capacity();
+
+        Ok(Some(AudioCaptureDebugSnapshot {
+            buffered_sample_count,
+            buffered_sample_capacity,
+            buffered_audio_bytes: buffered_sample_count * std::mem::size_of::<i16>(),
+            reserved_audio_bytes: buffered_sample_capacity * std::mem::size_of::<i16>(),
+            duration_ms: control.started_at.elapsed().as_millis() as u64,
+            sample_rate_hz: control.sample_rate_hz,
+            channels: control.channels,
+            device_id: control.device_id.clone(),
+            device_name: control.device_name.clone(),
+        }))
+    }
+
+    fn take_reusable_sample_buffer(&self) -> Vec<i16> {
+        match self.sample_buffer_pool.lock() {
+            Ok(mut pool) => pool.pop().unwrap_or_default(),
+            Err(_) => {
+                warn!("sample buffer pool lock is poisoned; allocating a fresh recording buffer");
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl RecordedAudio {
+    #[cfg(test)]
+    pub fn from_wav_bytes(
+        wav_bytes: Vec<u8>,
+        sample_rate_hz: u32,
+        channels: u16,
+        duration_ms: u64,
+        device_id: String,
+        device_name: String,
+    ) -> Self {
+        Self {
+            wav_bytes: Some(wav_bytes),
+            sample_rate_hz,
+            channels,
+            duration_ms,
+            device_id,
+            device_name,
+            pcm16_mono_samples: Vec::new(),
+            sample_buffer_pool: None,
+        }
+    }
+
+    pub fn empty(
+        sample_rate_hz: u32,
+        channels: u16,
+        duration_ms: u64,
+        device_id: String,
+        device_name: String,
+    ) -> Self {
+        Self {
+            wav_bytes: Some(Vec::new()),
+            sample_rate_hz,
+            channels,
+            duration_ms,
+            device_id,
+            device_name,
+            pcm16_mono_samples: Vec::new(),
+            sample_buffer_pool: None,
+        }
+    }
+
+    pub fn has_audio(&self) -> bool {
+        self.sample_count() > 0
+            || self
+                .wav_bytes
+                .as_ref()
+                .is_some_and(|wav_bytes| !wav_bytes.is_empty())
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.pcm16_mono_samples.len()
+    }
+
+    pub fn ensure_wav_bytes(&mut self) -> Result<(), String> {
+        if self.wav_bytes.is_none() {
+            self.wav_bytes = Some(pcm16_to_wav_bytes(
+                &self.pcm16_mono_samples,
+                self.sample_rate_hz,
+                self.channels,
+            )?);
+        }
+
+        Ok(())
+    }
+
+    pub fn into_wav_bytes(mut self) -> Result<Vec<u8>, String> {
+        self.ensure_wav_bytes()?;
+        self.pcm16_mono_samples.clear();
+        Ok(self.wav_bytes.take().unwrap_or_default())
+    }
+}
+
+impl Drop for RecordedAudio {
+    fn drop(&mut self) {
+        let Some(sample_buffer_pool) = self.sample_buffer_pool.take() else {
+            return;
+        };
+
+        let mut reusable_buffer = std::mem::take(&mut self.pcm16_mono_samples);
+        reusable_buffer.clear();
+
+        let lock_result = sample_buffer_pool.lock();
+        match lock_result {
+            Ok(mut pool) => pool.push(reusable_buffer),
+            Err(_) => {
+                warn!("sample buffer pool lock is poisoned; dropping reusable recording buffer");
+            }
+        }
     }
 }
 

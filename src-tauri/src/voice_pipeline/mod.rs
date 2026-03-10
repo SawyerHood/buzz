@@ -3,6 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
+use crate::audio_capture_service::RecordedAudio;
 use crate::status_notifier::AppStatus;
 
 const DEFAULT_ERROR_RESET_DELAY_MS: u64 = 1_500;
@@ -50,8 +51,9 @@ pub trait VoicePipelineDelegate: Send + Sync {
     fn on_recording_started(&self, _success: bool) {}
     fn on_recording_stopped(&self, _success: bool) {}
     fn start_recording(&self) -> Result<(), String>;
-    fn stop_recording(&self) -> Result<Vec<u8>, String>;
-    async fn transcribe(&self, wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String>;
+    fn stop_recording(&self) -> Result<RecordedAudio, String>;
+    async fn transcribe(&self, recorded_audio: RecordedAudio)
+        -> Result<PipelineTranscript, String>;
     fn insert_text(&self, transcript: &str) -> Result<(), String>;
     fn save_history_entry(&self, _transcript: &PipelineTranscript) -> Result<(), String> {
         Ok(())
@@ -99,14 +101,17 @@ impl VoicePipeline {
         info!("pipeline handling hotkey stop");
         delegate.set_status(AppStatus::Transcribing);
 
-        let wav_bytes = match delegate.stop_recording() {
-            Ok(wav_bytes) => {
+        let recorded_audio = match delegate.stop_recording() {
+            Ok(recorded_audio) => {
                 info!(
-                    audio_bytes = wav_bytes.len(),
+                    duration_ms = recorded_audio.duration_ms,
+                    sample_rate_hz = recorded_audio.sample_rate_hz,
+                    channels = recorded_audio.channels,
+                    sample_count = recorded_audio.sample_count(),
                     "recording stopped successfully"
                 );
                 delegate.on_recording_stopped(true);
-                wav_bytes
+                recorded_audio
             }
             Err(message) => {
                 error!(message = %message, "recording stop failed");
@@ -117,13 +122,13 @@ impl VoicePipeline {
             }
         };
 
-        if wav_bytes.is_empty() {
+        if !recorded_audio.has_audio() {
             info!("recording produced no audio; returning to idle");
             delegate.set_status(AppStatus::Idle);
             return;
         }
 
-        let transcript = match delegate.transcribe(wav_bytes).await {
+        let transcript = match delegate.transcribe(recorded_audio).await {
             Ok(transcript) => {
                 info!(
                     transcript_chars = transcript.text.chars().count(),
@@ -197,6 +202,17 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    fn recorded_audio(bytes: Vec<u8>) -> RecordedAudio {
+        RecordedAudio::from_wav_bytes(
+            bytes,
+            16_000,
+            1,
+            1_000,
+            "test-device".to_string(),
+            "Test Device".to_string(),
+        )
+    }
 
     #[derive(Debug)]
     struct MockDelegate {
@@ -334,15 +350,21 @@ mod tests {
             self.start_result.clone()
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
             self.call_order
                 .lock()
                 .expect("call-order lock should not be poisoned")
                 .push("stop_recording");
-            self.stop_result.clone()
+            self.stop_result
+                .as_ref()
+                .map(|bytes| recorded_audio(bytes.clone()))
+                .map_err(Clone::clone)
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             self.call_order
                 .lock()
                 .expect("call-order lock should not be poisoned")

@@ -573,6 +573,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::{
+        audio_capture_service::RecordedAudio,
         status_notifier::AppStatus,
         voice_pipeline::{
             PipelineError, PipelineErrorStage, PipelineTranscript, VoicePipeline,
@@ -646,11 +647,14 @@ mod tests {
             Err("microphone unavailable".to_string())
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
             panic!("stop should not be called for start failure scenario");
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             panic!("transcribe should not be called for start failure scenario");
         }
 

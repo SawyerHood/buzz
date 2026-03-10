@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/use-dark-mode";
+import { reportRendererMemory } from "./debugMemory";
 import HistoryPanel from "./HistoryPanel";
 import Settings from "./Settings";
 import Onboarding from "./Onboarding";
@@ -598,6 +599,10 @@ function App() {
     () => readPermissionCardDismissed()
   );
   const statusRef = useRef<AppStatus>("idle");
+  const lastTranscriptRef = useRef("");
+  const onboardingStateRef = useRef<OnboardingState>("loading");
+  const permissionsGrantedRef = useRef(false);
+  const backendSyncedRef = useRef(true);
 
   useEffect(() => {
     let isMounted = true;
@@ -624,6 +629,22 @@ function App() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    lastTranscriptRef.current = lastTranscript;
+  }, [lastTranscript]);
+
+  useEffect(() => {
+    onboardingStateRef.current = onboardingState;
+  }, [onboardingState]);
+
+  useEffect(() => {
+    permissionsGrantedRef.current = permissions?.allGranted ?? false;
+  }, [permissions?.allGranted]);
+
+  useEffect(() => {
+    backendSyncedRef.current = backendSynced;
+  }, [backendSynced]);
 
   useEffect(() => {
     if (onboardingState !== "completed") return undefined;
@@ -739,6 +760,48 @@ function App() {
   useEffect(() => {
     activeViewRef.current = activeView;
   }, [activeView]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+
+    const report = (reason: string) =>
+      reportRendererMemory("main", reason, {
+        onboardingState: onboardingStateRef.current,
+        status: statusRef.current,
+        activeView: activeViewRef.current,
+        transcriptChars: lastTranscriptRef.current.length,
+        permissionsGranted: permissionsGrantedRef.current,
+        backendSynced: backendSyncedRef.current,
+      });
+
+    void report("mount");
+    const interval = window.setInterval(() => {
+      void report("interval");
+    }, 15000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    void reportRendererMemory("main", "status-change", {
+      onboardingState,
+      status,
+      activeView,
+      transcriptChars: lastTranscript.length,
+      permissionsGranted: permissions?.allGranted ?? false,
+      backendSynced,
+    });
+  }, [
+    activeView,
+    backendSynced,
+    lastTranscript.length,
+    onboardingState,
+    permissions?.allGranted,
+    status,
+  ]);
 
   useEffect(() => {
     if (onboardingState !== "completed") return undefined;

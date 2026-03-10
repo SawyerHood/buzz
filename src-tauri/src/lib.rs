@@ -16,6 +16,7 @@ mod voice_pipeline;
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -26,8 +27,9 @@ use std::{
 use api_key_store::ApiKeyStore;
 use async_trait::async_trait;
 use audio_capture_service::{
-    AudioCaptureService, AudioInputChunk, AudioInputChunkCallback, AudioInputStreamErrorEvent,
-    MicrophoneInfo, RecordedAudio, AUDIO_INPUT_STREAM_ERROR_EVENT, AUDIO_LEVEL_EVENT,
+    AudioCaptureDebugSnapshot, AudioCaptureService, AudioInputChunk, AudioInputChunkCallback,
+    AudioInputStreamErrorEvent, MicrophoneInfo, RecordedAudio, AUDIO_INPUT_STREAM_ERROR_EVENT,
+    AUDIO_LEVEL_EVENT,
 };
 use auth_store::{AuthMethod, AuthStore};
 use history_store::{HistoryEntry, HistoryStore};
@@ -36,7 +38,7 @@ use hotkey_service::{
 };
 use logging::LoggingState;
 use permission_service::{PermissionService, PermissionSnapshot, PermissionState, PermissionType};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use settings_store::{
     SettingsStore, VoiceSettings, VoiceSettingsUpdate, RECORDING_MODE_HOLD_TO_TALK,
     RECORDING_MODE_TOGGLE, TRANSCRIPTION_STYLE_CASUAL, TRANSCRIPTION_STYLE_CLEAN,
@@ -356,6 +358,20 @@ struct PipelineErrorEvent {
 struct ChatGptAuthStatus {
     account_id: String,
     expires_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RendererMemorySnapshot {
+    source: String,
+    reason: String,
+    js_heap_bytes: Option<u64>,
+    total_js_heap_bytes: Option<u64>,
+    js_heap_limit_bytes: Option<u64>,
+    dom_node_count: usize,
+    url: String,
+    visibility_state: String,
+    details: serde_json::Value,
 }
 
 #[derive(Debug)]
@@ -827,7 +843,7 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         }
     }
 
-    fn stop_recording(&self) -> Result<Vec<u8>, String> {
+    fn stop_recording(&self) -> Result<RecordedAudio, String> {
         info!(session_id = ?self.session_id, "pipeline requested recording stop");
         let state = self.app.state::<AppState>();
         let result = state
@@ -844,11 +860,17 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
                     );
                     self.clear_realtime_session();
                     self.clear_recording_duration_secs();
-                    return Vec::new();
+                    return RecordedAudio::empty(
+                        recorded.sample_rate_hz,
+                        recorded.channels,
+                        recorded.duration_ms,
+                        recorded.device_id.clone(),
+                        recorded.device_name.clone(),
+                    );
                 }
                 let duration_secs = recorded.duration_ms as f64 / 1000.0;
                 self.store_recording_duration_secs(Some(duration_secs));
-                recorded.wav_bytes
+                recorded
             });
         if result.is_err() {
             self.clear_realtime_session();
@@ -857,7 +879,10 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
         result
     }
 
-    async fn transcribe(&self, wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+    async fn transcribe(
+        &self,
+        recorded_audio: RecordedAudio,
+    ) -> Result<PipelineTranscript, String> {
         let settings = self.current_settings();
         let transcription_prompt = resolve_transcription_prompt(
             &settings.transcription_style,
@@ -928,6 +953,8 @@ impl VoicePipelineDelegate for AppPipelineDelegate {
                     .to_string(),
             );
         }
+
+        let wav_bytes = recorded_audio.into_wav_bytes()?;
 
         info!(
             session_id = ?self.session_id,
@@ -1056,6 +1083,8 @@ fn set_status_for_state(app: &AppHandle, state: &AppState, status: AppStatus) {
     if let Err(error) = app.emit(EVENT_STATUS_CHANGED, status) {
         warn!(?status, %error, "failed to emit status changed event");
     }
+
+    log_memory_snapshot(app, &format!("status:{status:?}"));
 }
 
 fn set_status_for_app(app: &AppHandle, status: AppStatus) {
@@ -1089,6 +1118,154 @@ fn emit_pipeline_error_event(app: &AppHandle, error: &PipelineError) {
             stage = error.stage.as_str(),
             event_error = %emit_error,
             "failed to emit pipeline error event"
+        );
+    }
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    let pid = std::process::id().to_string();
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let rss_kb = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(rss_kb.saturating_mul(1024))
+}
+
+fn realtime_session_active(runtime_state: &PipelineRuntimeState) -> bool {
+    runtime_state
+        .realtime_session
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+}
+
+fn log_memory_snapshot(app: &AppHandle, reason: &str) {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (app, reason);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let state = app.state::<AppState>();
+        let runtime_state = app.state::<PipelineRuntimeState>();
+        let hotkey_service = app.state::<HotkeyService>();
+        let rss_bytes = current_process_rss_bytes();
+        let rss_available = rss_bytes.is_some();
+        let rss_bytes = rss_bytes.unwrap_or(0);
+        let audio_snapshot = state
+            .services
+            .audio_capture_service
+            .debug_snapshot()
+            .ok()
+            .flatten();
+        let status = get_status_from_state(&state);
+
+        let (
+            audio_recording_active,
+            audio_buffer_samples,
+            audio_buffer_capacity,
+            audio_buffer_bytes,
+            audio_reserved_bytes,
+            audio_duration_ms,
+            audio_sample_rate_hz,
+            audio_channels,
+            audio_device_id,
+            audio_device_name,
+        ) = match audio_snapshot {
+            Some(AudioCaptureDebugSnapshot {
+                buffered_sample_count,
+                buffered_sample_capacity,
+                buffered_audio_bytes,
+                reserved_audio_bytes,
+                duration_ms,
+                sample_rate_hz,
+                channels,
+                device_id,
+                device_name,
+            }) => (
+                true,
+                buffered_sample_count as u64,
+                buffered_sample_capacity as u64,
+                buffered_audio_bytes as u64,
+                reserved_audio_bytes as u64,
+                duration_ms,
+                sample_rate_hz,
+                channels,
+                device_id,
+                device_name,
+            ),
+            None => (false, 0, 0, 0, 0, 0, 0, 0, String::new(), String::new()),
+        };
+
+        info!(
+            reason,
+            pid = std::process::id(),
+            rss_available,
+            rss_bytes,
+            rss_mib = rss_bytes as f64 / (1024.0 * 1024.0),
+            status = ?status,
+            hotkey_recording = hotkey_service.is_recording(),
+            active_session_id = ?runtime_state.active_session_id(),
+            realtime_session_active = realtime_session_active(&runtime_state),
+            audio_recording_active,
+            audio_buffer_samples,
+            audio_buffer_capacity,
+            audio_buffer_bytes,
+            audio_reserved_bytes,
+            audio_duration_ms,
+            audio_sample_rate_hz,
+            audio_channels,
+            audio_device_id,
+            audio_device_name,
+            "debug memory snapshot"
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+fn register_debug_memory_probe(app: &AppHandle) {
+    let debug_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            log_memory_snapshot(&debug_app, "interval");
+        }
+    });
+}
+
+#[cfg(not(debug_assertions))]
+fn register_debug_memory_probe(_app: &AppHandle) {}
+
+#[tauri::command]
+fn debug_report_renderer_memory(snapshot: RendererMemorySnapshot) {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = snapshot;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        info!(
+            source = %snapshot.source,
+            reason = %snapshot.reason,
+            js_heap_bytes = ?snapshot.js_heap_bytes,
+            total_js_heap_bytes = ?snapshot.total_js_heap_bytes,
+            js_heap_limit_bytes = ?snapshot.js_heap_limit_bytes,
+            dom_node_count = snapshot.dom_node_count,
+            url = %snapshot.url,
+            visibility_state = %snapshot.visibility_state,
+            details = %snapshot.details,
+            "renderer memory snapshot"
         );
     }
 }
@@ -1186,18 +1363,32 @@ fn setup_recording_overlay_window(app: &AppHandle) {
     }
 }
 
-fn set_overlay_visible_for_status(app: &AppHandle, status: AppStatus) {
+fn close_recording_overlay_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
         return;
     };
 
+    info!("closing recording overlay window");
+    if let Err(error) = window.close() {
+        warn!(%error, "failed to close recording overlay window");
+    }
+}
+
+fn set_overlay_visible_for_status(app: &AppHandle, status: AppStatus) {
     if should_show_overlay_for_status(status) {
+        if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_none() {
+            setup_recording_overlay_window(app);
+        }
+
+        let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
+            return;
+        };
         position_overlay_window(&window, app);
         if let Err(error) = window.show() {
             warn!(%error, "failed to show recording overlay window");
         }
-    } else if let Err(error) = window.hide() {
-        warn!(%error, "failed to hide recording overlay window");
+    } else {
+        close_recording_overlay_window(app);
     }
 }
 
@@ -1208,6 +1399,12 @@ fn register_overlay_audio_forwarder(app: &AppHandle) {
             warn!(%error, payload = event.payload(), "invalid audio-level payload");
             0.0
         });
+        if overlay_app
+            .get_webview_window(OVERLAY_WINDOW_LABEL)
+            .is_none()
+        {
+            return;
+        }
         if let Err(error) = overlay_app.emit_to(
             EventTarget::webview_window(OVERLAY_WINDOW_LABEL),
             EVENT_OVERLAY_AUDIO_LEVEL,
@@ -1857,7 +2054,7 @@ fn stop_recording(
     state: tauri::State<'_, AppState>,
 ) -> Result<RecordedAudio, String> {
     info!("manual recording stop requested");
-    let recorded = state
+    let mut recorded = state
         .services
         .audio_capture_service
         .stop_recording(app.clone())
@@ -1865,12 +2062,18 @@ fn stop_recording(
             error!(%error, "manual recording stop failed");
             error
         })?;
+    recorded.ensure_wav_bytes()?;
 
     set_status_for_state(&app, &state, AppStatus::Idle);
     info!(
         duration_ms = recorded.duration_ms,
         sample_rate_hz = recorded.sample_rate_hz,
         channels = recorded.channels,
+        wav_bytes = recorded
+            .wav_bytes
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or_default(),
         "manual recording stopped"
     );
     Ok(recorded)
@@ -2236,9 +2439,9 @@ pub fn run() {
                 warn!(%error, "failed to apply launch-at-login preference");
             }
 
-            setup_recording_overlay_window(app.handle());
             register_overlay_audio_forwarder(app.handle());
             register_pipeline_handlers(app.handle());
+            register_debug_memory_probe(app.handle());
             set_status_for_app(app.handle(), AppStatus::Idle);
             info!("overlay, pipeline handlers, and initial status configured");
 
@@ -2285,6 +2488,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == OVERLAY_WINDOW_LABEL {
+                    info!("allowing overlay window close request to proceed");
+                    return;
+                }
                 api.prevent_close();
                 info!(window = %window.label(), "window close requested; hiding instead");
                 if let Err(error) = window.hide() {
@@ -2333,6 +2540,7 @@ pub fn run() {
             get_usage_stats,
             reset_usage_stats,
             export_logs,
+            debug_report_renderer_memory,
             hotkey_service::get_hotkey_config,
             hotkey_service::get_hotkey_recording_state,
             hotkey_service::set_hotkey_config
@@ -2355,6 +2563,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
+        audio_capture_service::RecordedAudio,
         hotkey_service::{HotkeyConfig, RecordingMode},
         settings_store::{VoiceSettings, VoiceSettingsUpdate, RECORDING_MODE_TOGGLE},
         status_notifier::AppStatus,
@@ -2397,6 +2606,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn recorded_audio(bytes: Vec<u8>) -> RecordedAudio {
+        RecordedAudio::from_wav_bytes(
+            bytes,
+            16_000,
+            1,
+            1_000,
+            "test-device".to_string(),
+            "Test Device".to_string(),
+        )
     }
 
     #[derive(Debug, Default)]
@@ -2517,11 +2737,14 @@ mod tests {
             Ok(())
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
-            Ok(vec![1, 2, 3])
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
+            Ok(recorded_audio(vec![1, 2, 3]))
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             if let Some(started_tx) = self
                 .transcribe_started_tx
                 .lock()
@@ -2621,11 +2844,14 @@ mod tests {
             Ok(())
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
-            Ok(vec![4, 5, 6])
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
+            Ok(recorded_audio(vec![4, 5, 6]))
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             Err("provider unavailable".to_string())
         }
 
@@ -2703,11 +2929,14 @@ mod tests {
             Ok(())
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
-            Ok(vec![7, 8, 9])
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
+            Ok(recorded_audio(vec![7, 8, 9]))
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             Ok(PipelineTranscript {
                 text: "hello world".to_string(),
                 duration_secs: Some(2.4),
@@ -2773,11 +3002,14 @@ mod tests {
             Ok(())
         }
 
-        fn stop_recording(&self) -> Result<Vec<u8>, String> {
-            Ok(Vec::new())
+        fn stop_recording(&self) -> Result<RecordedAudio, String> {
+            Ok(recorded_audio(Vec::new()))
         }
 
-        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> Result<PipelineTranscript, String> {
+        async fn transcribe(
+            &self,
+            _recorded_audio: RecordedAudio,
+        ) -> Result<PipelineTranscript, String> {
             Ok(PipelineTranscript {
                 text: String::new(),
                 duration_secs: None,
