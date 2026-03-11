@@ -64,6 +64,9 @@ use transcription::realtime::{
 use transcription::{TranscriptionOptions, TranscriptionOrchestrator, TranscriptionProvider};
 use voice_pipeline::{PipelineError, PipelineTranscript, VoicePipeline, VoicePipelineDelegate};
 
+#[cfg(target_os = "macos")]
+use objc::{msg_send, runtime::Object, sel, sel_impl};
+
 const EVENT_STATUS_CHANGED: &str = "voice://status-changed";
 const EVENT_TRANSCRIPT_READY: &str = "voice://transcript-ready";
 const EVENT_TRANSCRIPTION_DELTA: &str = "voice://transcription-delta";
@@ -1274,6 +1277,23 @@ fn should_show_overlay_for_status(status: AppStatus) -> bool {
     matches!(status, AppStatus::Listening | AppStatus::Transcribing)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayWindowAction {
+    CreateAndShow,
+    ShowExisting,
+    HideExisting,
+    Noop,
+}
+
+fn overlay_window_action(status: AppStatus, overlay_exists: bool) -> OverlayWindowAction {
+    match (should_show_overlay_for_status(status), overlay_exists) {
+        (true, true) => OverlayWindowAction::ShowExisting,
+        (true, false) => OverlayWindowAction::CreateAndShow,
+        (false, true) => OverlayWindowAction::HideExisting,
+        (false, false) => OverlayWindowAction::Noop,
+    }
+}
+
 fn overlay_position_from_work_area(
     work_area_position: PhysicalPosition<i32>,
     work_area_width: u32,
@@ -1338,6 +1358,7 @@ fn create_recording_overlay_window(app: &AppHandle) -> Result<WebviewWindow, Str
     .focused(false)
     .visible(false)
     .transparent(true)
+    .accept_first_mouse(true)
     .build()
     .map_err(|error| format!("failed to create recording overlay window: {error}"))?;
 
@@ -1352,6 +1373,39 @@ fn create_recording_overlay_window(app: &AppHandle) -> Result<WebviewWindow, Str
     Ok(window)
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn show_recording_overlay_window(window: &WebviewWindow) -> Result<(), String> {
+    let ns_window = window
+        .ns_window()
+        .map_err(|error| format!("failed to access recording overlay native window: {error}"))?
+        as usize;
+
+    // Tauri/Tao maps `show()` to `makeKeyAndOrderFront` on macOS, which activates Buzz and
+    // steals focus from the currently active app. Order the overlay front without activating it.
+    window
+        .run_on_main_thread(move || unsafe {
+            let ns_window = ns_window as *mut Object;
+            let _: () = msg_send![ns_window, orderFrontRegardless];
+        })
+        .map_err(|error| {
+            format!("failed to show recording overlay window without activating app: {error}")
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_recording_overlay_window(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .show()
+        .map_err(|error| format!("failed to show recording overlay window: {error}"))
+}
+
+fn hide_recording_overlay_window(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .hide()
+        .map_err(|error| format!("failed to hide recording overlay window: {error}"))
+}
+
 fn setup_recording_overlay_window(app: &AppHandle) {
     if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_some() {
         return;
@@ -1363,32 +1417,35 @@ fn setup_recording_overlay_window(app: &AppHandle) {
     }
 }
 
-fn close_recording_overlay_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
-        return;
-    };
-
-    info!("closing recording overlay window");
-    if let Err(error) = window.close() {
-        warn!(%error, "failed to close recording overlay window");
-    }
-}
-
 fn set_overlay_visible_for_status(app: &AppHandle, status: AppStatus) {
-    if should_show_overlay_for_status(status) {
-        if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_none() {
-            setup_recording_overlay_window(app);
-        }
+    let action = overlay_window_action(
+        status,
+        app.get_webview_window(OVERLAY_WINDOW_LABEL).is_some(),
+    );
 
-        let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
-            return;
-        };
-        position_overlay_window(&window, app);
-        if let Err(error) = window.show() {
-            warn!(%error, "failed to show recording overlay window");
+    if matches!(action, OverlayWindowAction::CreateAndShow) {
+        setup_recording_overlay_window(app);
+    }
+
+    match action {
+        OverlayWindowAction::CreateAndShow | OverlayWindowAction::ShowExisting => {
+            let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
+                return;
+            };
+            position_overlay_window(&window, app);
+            if let Err(error) = show_recording_overlay_window(&window) {
+                warn!(%error, "failed to show recording overlay window");
+            }
         }
-    } else {
-        close_recording_overlay_window(app);
+        OverlayWindowAction::HideExisting => {
+            let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
+                return;
+            };
+            if let Err(error) = hide_recording_overlay_window(&window) {
+                warn!(%error, "failed to hide recording overlay window");
+            }
+        }
+        OverlayWindowAction::Noop => {}
     }
 }
 
@@ -2578,10 +2635,10 @@ mod tests {
         apply_settings_transaction_with_hooks, cancel_recording_with_hooks,
         copy_directory_contents, handle_audio_input_stream_error_with_hooks, has_api_key,
         load_startup_settings_with_fallback, migrate_legacy_app_data_dir,
-        overlay_position_from_work_area, permission_preflight_error_message,
+        overlay_position_from_work_area, overlay_window_action, permission_preflight_error_message,
         resolve_transcription_prompt, should_hide_main_window_on_startup,
         should_show_overlay_for_status, spawn_pipeline_stage_error_reset, AppState,
-        PipelineRuntimeState, OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
+        OverlayWindowAction, PipelineRuntimeState, OVERLAY_WINDOW_TOP_MARGIN, OVERLAY_WINDOW_WIDTH,
     };
     use crate::permission_service::{PermissionState, PermissionType};
 
@@ -3931,6 +3988,38 @@ mod tests {
         assert!(should_show_overlay_for_status(AppStatus::Transcribing));
         assert!(!should_show_overlay_for_status(AppStatus::Idle));
         assert!(!should_show_overlay_for_status(AppStatus::Error));
+    }
+
+    #[test]
+    fn overlay_window_action_creates_and_shows_when_recording_starts_from_hidden_state() {
+        assert_eq!(
+            overlay_window_action(AppStatus::Listening, false),
+            OverlayWindowAction::CreateAndShow
+        );
+    }
+
+    #[test]
+    fn overlay_window_action_reuses_existing_window_when_status_stays_visible() {
+        assert_eq!(
+            overlay_window_action(AppStatus::Transcribing, true),
+            OverlayWindowAction::ShowExisting
+        );
+    }
+
+    #[test]
+    fn overlay_window_action_hides_existing_window_when_status_returns_idle() {
+        assert_eq!(
+            overlay_window_action(AppStatus::Idle, true),
+            OverlayWindowAction::HideExisting
+        );
+    }
+
+    #[test]
+    fn overlay_window_action_is_noop_when_overlay_is_absent_and_status_is_hidden() {
+        assert_eq!(
+            overlay_window_action(AppStatus::Error, false),
+            OverlayWindowAction::Noop
+        );
     }
 
     #[test]
