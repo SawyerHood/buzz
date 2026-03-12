@@ -472,6 +472,17 @@ impl RecordedAudio {
     }
 }
 
+trait StreamController {
+    fn pause_stream(&self) -> Result<(), String>;
+}
+
+impl StreamController for Stream {
+    fn pause_stream(&self) -> Result<(), String> {
+        self.pause()
+            .map_err(|err| format!("Failed to pause microphone stream: {err}"))
+    }
+}
+
 impl Drop for RecordedAudio {
     fn drop(&mut self) {
         let Some(sample_buffer_pool) = self.sample_buffer_pool.take() else {
@@ -594,6 +605,7 @@ fn recording_thread_main(
         let _ = app_handle.emit(AUDIO_LEVEL_EVENT, level);
     });
 
+    pause_stream_before_release(&stream);
     drop(stream);
     audio_level_bits.store(0.0_f32.to_bits(), Ordering::Relaxed);
     if let Err(error) = app_handle.emit(AUDIO_LEVEL_EVENT, 0.0_f32) {
@@ -618,7 +630,10 @@ fn start_recording_worker(
     on_input_chunk: Option<AudioInputChunkCallback>,
 ) -> Result<(Stream, RecordingRuntime, Receiver<String>), String> {
     let host = cpal::default_host();
-    let default_input_device_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_input_device = host.default_input_device();
+    let default_input_device_name = default_input_device
+        .as_ref()
+        .and_then(|device| device.name().ok());
     let devices = enumerate_input_devices(&host)?;
     if devices.is_empty() {
         return Err("No microphone input devices are available".to_string());
@@ -629,21 +644,41 @@ fn start_recording_worker(
         preferred_device_id,
         default_input_device_name.as_deref(),
     )?;
+    let EnumeratedInputDevice {
+        id: selected_device_id,
+        name: selected_device_name,
+        is_default: selected_is_default,
+        sample_rate_hz: _,
+        channels: _,
+        device: enumerated_device,
+    } = selected_device;
+    let (input_device, using_host_default_handle) =
+        prefer_default_device_handle(enumerated_device, selected_is_default, default_input_device);
+    if using_host_default_handle {
+        debug!(
+            device_id = %selected_device_id,
+            device_name = %selected_device_name,
+            "using host default microphone handle for recording"
+        );
+    } else if selected_is_default {
+        warn!(
+            device_id = %selected_device_id,
+            device_name = %selected_device_name,
+            "selected default microphone but host default handle was unavailable; using enumerated device handle"
+        );
+    }
     info!(
-        device_id = %selected_device.id,
-        device_name = %selected_device.name,
+        device_id = %selected_device_id,
+        device_name = %selected_device_name,
         "starting recording worker for selected device"
     );
 
-    let supported_config = selected_device
-        .device
-        .default_input_config()
-        .map_err(|err| {
-            format!(
-                "Failed to read default input config for '{}': {err}",
-                selected_device.name
-            )
-        })?;
+    let supported_config = input_device.default_input_config().map_err(|err| {
+        format!(
+            "Failed to read default input config for '{}': {err}",
+            selected_device_name
+        )
+    })?;
 
     let stream_config: StreamConfig = supported_config.clone().into();
     let sample_format = supported_config.sample_format();
@@ -658,7 +693,7 @@ fn start_recording_worker(
     let (stream_error_tx, stream_error_rx) = mpsc::channel::<String>();
 
     let stream = build_input_stream(
-        &selected_device.device,
+        &input_device,
         &stream_config,
         sample_format,
         input_channels,
@@ -683,8 +718,8 @@ fn start_recording_worker(
         RecordingRuntime {
             sample_rate_hz,
             channels: 1,
-            device_id: selected_device.id,
-            device_name: selected_device.name,
+            device_id: selected_device_id,
+            device_name: selected_device_name,
         },
         stream_error_rx,
     ))
@@ -724,6 +759,26 @@ fn report_stream_error(format_label: &str, stream_error_tx: &Sender<String>, err
     let message = format!("Microphone stream error ({format_label}): {err}");
     let _ = stream_error_tx.send(message.clone());
     error!(%message, "microphone stream callback error");
+}
+
+fn pause_stream_before_release<S: StreamController>(stream: &S) {
+    if let Err(error) = stream.pause_stream() {
+        warn!(%error, "failed to pause microphone stream before release");
+    }
+}
+
+fn prefer_default_device_handle<T>(
+    enumerated_device: T,
+    is_default: bool,
+    default_device: Option<T>,
+) -> (T, bool) {
+    if is_default {
+        if let Some(default_device) = default_device {
+            return (default_device, true);
+        }
+    }
+
+    (enumerated_device, false)
 }
 
 fn enumerate_input_devices(host: &cpal::Host) -> Result<Vec<EnumeratedInputDevice>, String> {
@@ -1475,18 +1530,34 @@ fn pcm16_to_wav_bytes(
 mod tests {
     use std::{
         collections::HashMap,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
         thread,
         time::{Duration, Instant},
     };
 
     use super::{
         await_worker_startup, build_macos_identity_lookup_by_name, build_microphone_device_id,
-        ensure_unique_device_id, float_to_pcm16, legacy_device_slug, pcm16_to_wav_bytes,
-        quantize_audio_level_for_emit, run_recording_loop, select_input_device_index,
-        slugify_device_name, take_macos_identity_by_device_name, InputDeviceSelectionCandidate,
-        MacosCoreAudioDeviceIdentity, RecordingLoopExit, RecordingRuntime,
+        ensure_unique_device_id, float_to_pcm16, legacy_device_slug, pause_stream_before_release,
+        pcm16_to_wav_bytes, prefer_default_device_handle, quantize_audio_level_for_emit,
+        run_recording_loop, select_input_device_index, slugify_device_name,
+        take_macos_identity_by_device_name, InputDeviceSelectionCandidate,
+        MacosCoreAudioDeviceIdentity, RecordingLoopExit, RecordingRuntime, StreamController,
     };
+
+    struct MockStreamController {
+        paused: Arc<AtomicBool>,
+        pause_result: Result<(), String>,
+    }
+
+    impl StreamController for MockStreamController {
+        fn pause_stream(&self) -> Result<(), String> {
+            self.paused.store(true, Ordering::Relaxed);
+            self.pause_result.clone()
+        }
+    }
 
     #[test]
     fn slugify_device_name_normalizes_ascii() {
@@ -1748,6 +1819,46 @@ mod tests {
         let exit = run_recording_loop(&stop_rx, &stream_error_rx, || {});
 
         assert_eq!(exit, RecordingLoopExit::StopRequested);
+    }
+
+    #[test]
+    fn pause_stream_before_release_attempts_to_pause_stream() {
+        let paused = Arc::new(AtomicBool::new(false));
+        let stream = MockStreamController {
+            paused: Arc::clone(&paused),
+            pause_result: Ok(()),
+        };
+
+        pause_stream_before_release(&stream);
+
+        assert!(paused.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn prefer_default_device_handle_uses_host_default_when_selected_device_is_default() {
+        let (resolved, used_host_default) =
+            prefer_default_device_handle("enumerated", true, Some("default"));
+
+        assert_eq!(resolved, "default");
+        assert!(used_host_default);
+    }
+
+    #[test]
+    fn prefer_default_device_handle_falls_back_when_host_default_is_unavailable() {
+        let (resolved, used_host_default) =
+            prefer_default_device_handle("enumerated", true, Option::<&str>::None);
+
+        assert_eq!(resolved, "enumerated");
+        assert!(!used_host_default);
+    }
+
+    #[test]
+    fn prefer_default_device_handle_keeps_non_default_selection() {
+        let (resolved, used_host_default) =
+            prefer_default_device_handle("enumerated", false, Some("default"));
+
+        assert_eq!(resolved, "enumerated");
+        assert!(!used_host_default);
     }
 
     #[test]
